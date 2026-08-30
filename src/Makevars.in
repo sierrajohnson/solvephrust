@@ -1,7 +1,7 @@
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/@LIBDIR@
-STATLIB = $(LIBDIR)/libsovlephrust.a
-PKG_LIBS = -L$(LIBDIR) -lsovlephrust
+STATLIB = $(LIBDIR)/libsolvephrust.a
+PKG_LIBS = -L$(LIBDIR) -lsolvephrust
 
 all: $(SHLIB) rust_clean
 

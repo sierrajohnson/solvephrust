@@ -1,5 +1,5 @@
 [package]
-name = 'sovlephrust'
+name = 'solvephrust'
 publish = false
 version = '0.1.0'
 edition = '2021'
@@ -7,10 +7,12 @@ rust-version = '1.65'
 
 [lib]
 crate-type = [ 'staticlib' ]
-name = 'sovlephrust'
+name = 'solvephrust'
 
 [dependencies]
 extendr-api = '0.8.1'
+
+[dev-dependencies]
 roots = "0.0.8"
 
 [profile.release]
