@@ -587,112 +587,6 @@ fn arrange_points(a: f64, fa: f64, b: f64, fb: f64) -> (f64, f64, f64, f64) {
     }
 }
 
-/// Holds a cached Brent root and test-only function-evaluation count.
-#[cfg(test)]
-struct CachedBrentSolution {
-    root: f64,
-    #[cfg(test)]
-    evaluations: usize,
-}
-
-/// Holds a completed pH solve and test-only numerical instrumentation.
-#[cfg(test)]
-struct SolveOutcome {
-    ph: f64,
-    #[cfg(test)]
-    evaluations: usize,
-}
-
-/// Reproduces the existing Brent algorithm without re-evaluating cached endpoints.
-#[cfg(test)]
-fn find_root_brent_cached<Func>(
-    lower: f64,
-    upper: f64,
-    mut function: Func,
-    tolerance: f64,
-    max_iterations: usize,
-) -> SolverResult<CachedBrentSolution>
-where
-    Func: FnMut(f64) -> f64,
-{
-    #[cfg(test)]
-    let mut evaluations = 0;
-    let mut evaluate = |value| {
-        #[cfg(test)]
-        {
-            evaluations += 1;
-        }
-        function(value)
-    };
-    let lower_value = evaluate(lower);
-    let upper_value = evaluate(upper);
-    let (mut a, mut fa, mut b, mut fb) = arrange_points(lower, lower_value, upper, upper_value);
-    if !fa.is_finite() || !fb.is_finite() || fa * fb > 0.0 {
-        return Err("The pH solver failed to converge to a solution on [0, 14].".to_string());
-    }
-    let (mut c, mut fc, mut d) = (a, fa, a);
-    let mut bisected = true;
-
-    for _ in 0..max_iterations {
-        if fa.abs() < tolerance {
-            return Ok(CachedBrentSolution {
-                root: a,
-                #[cfg(test)]
-                evaluations,
-            });
-        }
-        if fb.abs() < tolerance {
-            return Ok(CachedBrentSolution {
-                root: b,
-                #[cfg(test)]
-                evaluations,
-            });
-        }
-        if (a - b).abs() < tolerance {
-            return Ok(CachedBrentSolution {
-                root: c,
-                #[cfg(test)]
-                evaluations,
-            });
-        }
-
-        let mut candidate = if fa != fc && fb != fc {
-            a * fb * fc / ((fa - fb) * (fa - fc))
-                + b * fa * fc / ((fb - fa) * (fb - fc))
-                + c * fa * fb / ((fc - fa) * (fc - fb))
-        } else {
-            b - fb * (b - a) / (fb - fa)
-        };
-        let outside_safe_region = (candidate - b) * (candidate - (3.0 * a + b) / 4.0) > 0.0;
-        let insufficient_progress = bisected && (candidate - b).abs() >= (b - c).abs() / 2.0;
-        let prior_insufficient_progress = !bisected && (candidate - b).abs() >= (c - d).abs() / 2.0;
-        let stale_bisection = bisected && (b - c).abs() < tolerance;
-        let stale_interpolation = !bisected && (c - d).abs() < tolerance;
-        if outside_safe_region
-            || insufficient_progress
-            || prior_insufficient_progress
-            || stale_bisection
-            || stale_interpolation
-        {
-            candidate = (a + b) / 2.0;
-            bisected = true;
-        } else {
-            bisected = false;
-        }
-
-        let candidate_value = evaluate(candidate);
-        d = c;
-        c = b;
-        fc = fb;
-        if fa * candidate_value < 0.0 {
-            (a, fa, b, fb) = arrange_points(a, fa, candidate, candidate_value);
-        } else {
-            (a, fa, b, fb) = arrange_points(candidate, candidate_value, b, fb);
-        }
-    }
-    Err("The pH solver failed to converge to a solution on [0, 14].".to_string())
-}
-
 /// Provides a cached-evaluation log-space Brent candidate for comparisons.
 #[cfg(test)]
 fn find_root_log_brent(balance: &ChargeBalance<'_>) -> SolverResult<RootSolution> {
@@ -831,52 +725,6 @@ fn solve_internal(
         dose_charge,
         starting_charge,
     )
-}
-
-/// Runs concentration-space Brent while reusing all previously evaluated points.
-#[cfg(test)]
-fn solve_internal_cached_brent(
-    temp: f64,
-    ionic_strength: Option<f64>,
-    kw: f64,
-    dependent_compounds: &[DependentCompound<'_>],
-    independent_compounds: &[IndependentCompound],
-    h_i: f64,
-    oh_i: f64,
-) -> SolverResult<SolveOutcome> {
-    let gammas = activity_coefficients(ionic_strength, temp);
-    let corrected_ks: Vec<[f64; MAX_CONSTANTS]> = dependent_compounds
-        .iter()
-        .map(|compound| correct_k(compound, temp, &gammas))
-        .collect();
-    let gamma_h = gammas[1];
-    let dose_charge: f64 = independent_compounds
-        .iter()
-        .map(|compound| f64::from(compound.charge) * compound.dose)
-        .sum();
-    let starting_charge = h_i - oh_i + dependent_compounds.iter().map(initial_charge).sum::<f64>();
-    let charge_balance = |h: f64| {
-        let oh = kw / (h * gamma_h * gamma_h);
-        let dependent_charge: f64 = dependent_compounds
-            .iter()
-            .zip(&corrected_ks)
-            .map(|(compound, corrected)| {
-                let alphas = calculate_alphas(
-                    h,
-                    &corrected[..compound.ions.len()],
-                    compound.charge_direction,
-                );
-                equilibrium_charge(compound, &alphas)
-            })
-            .sum();
-        h - oh + dependent_charge + dose_charge - starting_charge
-    };
-    let root = find_root_brent_cached(1e-14, 1.0, charge_balance, 1e-14, 1000)?;
-    Ok(SolveOutcome {
-        ph: -(root.root * gamma_h).log10(),
-        #[cfg(test)]
-        evaluations: root.evaluations,
-    })
 }
 
 /// Retains the previous concentration-space Brent solver as a test oracle.
@@ -1664,7 +1512,6 @@ mod tests {
         let mut rng = TestRng(0x5eed_fade_cafe_beef);
         let mut newton_evaluations = Vec::new();
         let mut log_brent_evaluations = Vec::new();
-        let mut cached_brent_evaluations = Vec::new();
         let mut legacy_evaluations = Vec::new();
         let mut legacy_accurate_cases = 0;
         let mut largest_legacy_error = 0.0_f64;
@@ -1730,16 +1577,6 @@ mod tests {
                 "case={case_index} newton={newton_result:.16} expected={expected:.16} difference={:.3e}",
                 (newton_result - expected).abs()
             );
-            let cached = solve_internal_cached_brent(
-                temp,
-                ionic_strength,
-                1e-14,
-                &compounds,
-                &[],
-                target_h,
-                target_oh,
-            )
-            .unwrap();
             let (legacy, legacy_count) = solve_internal_brent_reference(
                 temp,
                 ionic_strength,
@@ -1750,7 +1587,6 @@ mod tests {
                 target_oh,
             )
             .unwrap();
-            assert!((cached.ph - legacy).abs() <= 1e-14);
             let legacy_error = (legacy - expected).abs();
             largest_legacy_error = largest_legacy_error.max(legacy_error);
             if legacy_error <= 1e-10 {
@@ -1775,7 +1611,6 @@ mod tests {
             assert!((newton_ph - log_brent_ph).abs() <= 1e-10);
             newton_evaluations.push(newton.evaluations);
             log_brent_evaluations.push(log_brent.evaluations);
-            cached_brent_evaluations.push(cached.evaluations);
             legacy_evaluations.push(legacy_count);
         }
 
@@ -1783,14 +1618,12 @@ mod tests {
         let newton_p95 = percentile(&mut newton_evaluations, 0.95);
         let newton_max = *newton_evaluations.iter().max().unwrap();
         let log_brent_median = percentile(&mut log_brent_evaluations, 0.5);
-        let cached_brent_median = percentile(&mut cached_brent_evaluations, 0.5);
         let legacy_median = percentile(&mut legacy_evaluations, 0.5);
         eprintln!(
-            "evaluations: newton median={newton_median} p95={newton_p95} max={newton_max}; log-brent median={log_brent_median}; cached-brent median={cached_brent_median}; legacy median={legacy_median}; legacy accurate={legacy_accurate_cases}/2000 largest error={largest_legacy_error:.3e} pH"
+            "evaluations: newton median={newton_median} p95={newton_p95} max={newton_max}; log-brent median={log_brent_median}; legacy median={legacy_median}; legacy accurate={legacy_accurate_cases}/2000 largest error={largest_legacy_error:.3e} pH"
         );
         assert!(legacy_accurate_cases > 1_000);
         assert!(newton_median < log_brent_median);
         assert!(newton_median < legacy_median);
-        assert!(cached_brent_median < legacy_median);
     }
 }
