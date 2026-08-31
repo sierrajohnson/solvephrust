@@ -1,6 +1,6 @@
 # Run from the package root after installing the package:
 #   R CMD INSTALL .
-#   Rscript tools/benchmark.R [passes]
+#   Rscript tools/benchmark.R [passes] [public|backend]
 
 suppressPackageStartupMessages(library(solvephrust))
 
@@ -8,6 +8,10 @@ args <- commandArgs(trailingOnly = TRUE)
 passes <- if (length(args)) as.integer(args[[1]]) else 1000L
 if (length(passes) != 1L || is.na(passes) || passes < 1L) {
   stop("`passes` must be one positive integer.", call. = FALSE)
+}
+interface <- if (length(args) >= 2L) args[[2]] else "public"
+if (!interface %in% c("public", "backend")) {
+  stop("`interface` must be either `public` or `backend`.", call. = FALSE)
 }
 
 csv_path <- file.path("tests", "testthat", "solve_ph_inputs_outputs.csv")
@@ -54,7 +58,7 @@ cases <- lapply(seq_len(nrow(test_data)), function(index) {
   )
 })
 
-run_case <- function(case) {
+run_public <- function(case) {
   solve(
     solver,
     temp = case$temp,
@@ -66,6 +70,17 @@ run_case <- function(case) {
     oh_i = case$oh_i
   )
 }
+
+backend_symbol <- get("wrap__solve_generic", envir = asNamespace("solvephrust"))
+run_backend <- function(case) {
+  .Call(
+    backend_symbol,
+    solver, case$temp, case$ionic_strength, case$kw,
+    case$ph_dependent, case$ph_independent, case$h_i, case$oh_i
+  )
+}
+
+run_case <- if (interface == "public") run_public else run_backend
 
 run_pass <- function() {
   vapply(cases, run_case, numeric(1))
@@ -84,6 +99,7 @@ elapsed <- unname(timing[["elapsed"]])
 total_solves <- passes * length(cases)
 
 cat(sprintf("cases per pass: %d\n", length(cases)))
+cat(sprintf("interface:      %s\n", interface))
 cat(sprintf("passes:         %d\n", passes))
 cat(sprintf("total solves:   %d\n", total_solves))
 cat(sprintf("elapsed:        %.3f s\n", elapsed))

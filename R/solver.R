@@ -1,10 +1,3 @@
-.rust_value <- function(result) {
-  if (!is.null(result$error)) {
-    stop(result$error, call. = FALSE)
-  }
-  result$value
-}
-
 #' Create a configurable pH solver
 #'
 #' @param ph_dependent A named list of equilibrium compound definitions. Each
@@ -19,7 +12,7 @@
 #'   serializable across R sessions.
 #' @export
 new_solver <- function(ph_dependent = list(), ph_independent_charges = list()) {
-  pointer <- .rust_value(create_solver(ph_dependent, ph_independent_charges))
+  pointer <- create_solver(ph_dependent, ph_independent_charges)
   structure(pointer, class = "solvephrust_solver")
 }
 
@@ -67,17 +60,11 @@ solve.solvephrust_solver <- function(a, b, ..., temp, kw,
   if (!missing(b)) {
     stop("`temp` must be supplied by name.", call. = FALSE)
   }
-  if (length(list(...))) {
+  if (...length()) {
     stop("Unused positional or named arguments are not supported.", call. = FALSE)
   }
-  .rust_value(solve_generic(
-    solver = a,
-    temp = temp,
-    ionic_strength = ionic_strength,
-    kw = kw,
-    dependent_compounds = ph_dependent,
-    independent_compounds = ph_independent,
-    h_i = h_i,
-    oh_i = oh_i
-  ))
+  .Call(
+    wrap__solve_generic,
+    a, temp, ionic_strength, kw, ph_dependent, ph_independent, h_i, oh_i
+  )
 }

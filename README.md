@@ -60,4 +60,13 @@ Rscript tools/benchmark.R
 
 Pass an optional number of complete dataset passes for shorter or longer runs,
 for example `Rscript tools/benchmark.R 100`. The output reports case and solve
-counts, elapsed time, solves per second, and average time per solve.
+counts, elapsed time, solves per second, and average time per solve. A second
+argument of `backend` bypasses S3 dispatch and the R method checks while using
+the same Rust FFI, validation, and numerical core:
+
+```sh
+Rscript tools/benchmark.R 1000 backend
+```
+
+Comparing `public` (the default) with `backend` separates the small R dispatch
+cost from the FFI-plus-solver cost without changing the workload.

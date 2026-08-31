@@ -165,6 +165,34 @@ test_that("Rust validates and accepts R scalar representations", {
   ), "ionic_strength")
 })
 
+test_that("condition and name-order caches never change solve results", {
+  co3 <- list(total = 1e-3, initial = list(5e-4, 0))
+  po4 <- list(total = 2e-4, initial = list(1e-4, 1e-4, 0))
+  conditions <- list(
+    list(temp = 5, ionic_strength = NULL,
+         ph_dependent = list(co3 = co3, po4 = po4)),
+    list(temp = 35, ionic_strength = 0.1,
+         ph_dependent = list(po4 = po4, co3 = co3)),
+    list(temp = 5, ionic_strength = NULL,
+         ph_dependent = list(po4 = po4, co3 = co3))
+  )
+  shared <- new_default_solver()
+
+  for (condition in conditions) {
+    shared_result <- solve(
+      shared, temp = condition$temp, ionic_strength = condition$ionic_strength,
+      kw = 1e-14, ph_dependent = condition$ph_dependent,
+      h_i = 1e-7, oh_i = 1e-7
+    )
+    fresh_result <- solve(
+      new_default_solver(), temp = condition$temp,
+      ionic_strength = condition$ionic_strength, kw = 1e-14,
+      ph_dependent = condition$ph_dependent, h_i = 1e-7, oh_i = 1e-7
+    )
+    expect_equal(shared_result, fresh_result, tolerance = 1e-12)
+  }
+})
+
 test_that("constructor reports invalid schemas", {
   step <- list(k = 1e-7, delta_h = 0)
   expect_error(new_solver(ph_dependent = list(list(constants = list(step), charge = -1))),
@@ -200,4 +228,11 @@ test_that("solve reports invalid runtime values", {
                      ph_dependent = list(co3 = list(total = 0, initial = list(0, 0))),
                      ph_independent = list(na = 1000)),
                "failed to converge")
+
+  duplicate_co3 <- setNames(list(
+    list(total = 0, initial = list(0, 0)),
+    list(total = 0, initial = list(0, 0))
+  ), c("co3", "co3"))
+  expect_error(solve(solver, temp = 25, kw = 1e-14,
+                     ph_dependent = duplicate_co3), "must be unique")
 })
