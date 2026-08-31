@@ -18,19 +18,15 @@ const MAX_SPECIES: usize = 4;
 const MAX_CONSTANTS: usize = MAX_SPECIES - 1;
 
 /// Lower endpoint of the existing hydrogen-concentration search interval.
-#[cfg(test)]
 const LOG_H_MIN: f64 = -14.0 * std::f64::consts::LN_10;
 
 /// Upper endpoint of the existing hydrogen-concentration search interval.
-#[cfg(test)]
 const LOG_H_MAX: f64 = 0.0;
 
 /// Gives the root finder approximately 1e-12 pH internal precision.
-#[cfg(test)]
 const LOG_H_TOLERANCE: f64 = std::f64::consts::LN_10 * 1e-12;
 
 /// Caps safeguarded iterations well above the bisection worst case.
-#[cfg(test)]
 const MAX_ROOT_ITERATIONS: usize = 100;
 
 /// Stores one dissociation step after its R definition has been validated.
@@ -88,12 +84,14 @@ struct SolverConfig {
 }
 
 /// Keeps the small set of species fractions on the stack during root finding.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct AlphaFractions {
     values: [f64; MAX_SPECIES],
     len: usize,
 }
 
+#[cfg(test)]
 impl AlphaFractions {
     /// Exposes only the entries populated for the compound's actual valence.
     fn as_slice(&self) -> &[f64] {
@@ -102,7 +100,6 @@ impl AlphaFractions {
 }
 
 /// Stores cumulative corrected log constants for repeated root evaluations.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct PreparedCompound {
     cumulative_log_k: [f64; MAX_SPECIES],
@@ -112,7 +109,6 @@ struct PreparedCompound {
 }
 
 /// Carries a compound's charge and derivative contribution from one softmax.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct ChargeMoments {
     charge: f64,
@@ -120,7 +116,6 @@ struct ChargeMoments {
 }
 
 /// Carries charge balance and its derivative with respect to log hydrogen.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct BalancePoint {
     balance: f64,
@@ -128,7 +123,6 @@ struct BalancePoint {
 }
 
 /// Holds values shared by every numerical evaluation in one solve.
-#[cfg(test)]
 struct ChargeBalance<'a> {
     compounds: &'a [PreparedCompound],
     kw: f64,
@@ -137,7 +131,6 @@ struct ChargeBalance<'a> {
     starting_charge: f64,
 }
 
-#[cfg(test)]
 impl ChargeBalance<'_> {
     /// Evaluates charge balance and its positive analytic derivative together.
     fn evaluate(&self, log_h: f64) -> BalancePoint {
@@ -158,7 +151,6 @@ impl ChargeBalance<'_> {
 }
 
 /// Contains a root and test-only evaluation instrumentation.
-#[cfg(test)]
 struct RootSolution {
     log_h: f64,
     #[cfg(test)]
@@ -225,7 +217,6 @@ fn correct_k(
 }
 
 /// Converts corrected constants into cumulative logs used by every root step.
-#[cfg(test)]
 fn prepare_compound(
     compound: &DependentCompound<'_>,
     temp: f64,
@@ -245,7 +236,6 @@ fn prepare_compound(
 }
 
 /// Fuses stable alpha normalization with charge mean and variance calculation.
-#[cfg(test)]
 fn charge_moments(compound: &PreparedCompound, log_h: f64) -> ChargeMoments {
     let mut log_weights = [0.0; MAX_SPECIES];
     for (index, weight) in log_weights[..compound.len].iter_mut().enumerate().skip(1) {
@@ -283,6 +273,7 @@ fn charge_moments(compound: &PreparedCompound, log_h: f64) -> ChargeMoments {
 /// compounds it is [H+] / K_i because K_i describes dissociation from charge
 /// +i toward charge +(i-1). This exists to provide all species fractions needed
 /// by charge balance while log-space normalization keeps extreme cases stable.
+#[cfg(test)]
 fn calculate_alphas(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFractions {
     let len = ks.len() + 1;
     debug_assert!(len <= MAX_SPECIES);
@@ -320,6 +311,7 @@ fn calculate_alphas(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFrac
 /// equations, but is deliberately not used by the solver because cumulative
 /// products can overflow or underflow for extreme constants or pH values.
 #[allow(dead_code)]
+#[cfg(test)]
 fn calculate_alphas_without_logs(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFractions {
     let len = ks.len() + 1;
     debug_assert!(len <= MAX_SPECIES);
@@ -344,6 +336,7 @@ fn calculate_alphas_without_logs(h: f64, ks: &[f64], direction: ChargeDirection)
 }
 
 /// Converts species fractions into the compound's equilibrium charge contribution.
+#[cfg(test)]
 fn equilibrium_charge(compound: &DependentCompound<'_>, alphas: &AlphaFractions) -> f64 {
     let signed_fraction: f64 = alphas
         .as_slice()
@@ -368,10 +361,10 @@ fn initial_charge(compound: &DependentCompound<'_>) -> f64 {
 }
 
 /// Finds the unique root with Newton steps guarded by a persistent bracket.
-#[cfg(test)]
 fn find_root_safeguarded(balance: &ChargeBalance<'_>) -> SolverResult<RootSolution> {
     #[cfg(test)]
     let mut evaluations = 0;
+    #[allow(unused_mut)]
     let mut evaluate = |log_h| {
         #[cfg(test)]
         {
@@ -456,6 +449,7 @@ fn find_root_safeguarded(balance: &ChargeBalance<'_>) -> SolverResult<RootSoluti
 }
 
 /// Orders Brent endpoints so the better residual is the second point.
+#[cfg(test)]
 fn arrange_points(a: f64, fa: f64, b: f64, fb: f64) -> (f64, f64, f64, f64) {
     if fa.abs() > fb.abs() {
         (a, fa, b, fb)
@@ -465,6 +459,7 @@ fn arrange_points(a: f64, fa: f64, b: f64, fb: f64) -> (f64, f64, f64, f64) {
 }
 
 /// Holds a cached Brent root and test-only function-evaluation count.
+#[cfg(test)]
 struct CachedBrentSolution {
     root: f64,
     #[cfg(test)]
@@ -472,6 +467,7 @@ struct CachedBrentSolution {
 }
 
 /// Holds a completed pH solve and test-only numerical instrumentation.
+#[cfg(test)]
 struct SolveOutcome {
     ph: f64,
     #[cfg(test)]
@@ -479,6 +475,7 @@ struct SolveOutcome {
 }
 
 /// Reproduces the existing Brent algorithm without re-evaluating cached endpoints.
+#[cfg(test)]
 fn find_root_brent_cached<Func>(
     lower: f64,
     upper: f64,
@@ -635,7 +632,6 @@ fn find_root_log_brent(balance: &ChargeBalance<'_>) -> SolverResult<RootSolution
 }
 
 /// Prepares a charge balance shared by production and reference root solvers.
-#[cfg(test)]
 fn prepare_balance<'a>(
     temp: f64,
     ionic_strength: Option<f64>,
@@ -658,9 +654,8 @@ fn prepare_balance<'a>(
     (prepared, gamma_h, dose_charge, starting_charge)
 }
 
-/// Runs the safeguarded Newton candidate for accuracy and speed comparisons.
-#[cfg(test)]
-fn solve_internal_newton_candidate(
+/// Solves pH with safeguarded Newton iteration in log-hydrogen space.
+fn solve_internal(
     temp: f64,
     ionic_strength: Option<f64>,
     kw: f64,
@@ -689,6 +684,7 @@ fn solve_internal_newton_candidate(
 }
 
 /// Runs concentration-space Brent while reusing all previously evaluated points.
+#[cfg(test)]
 fn solve_internal_cached_brent(
     temp: f64,
     ionic_strength: Option<f64>,
@@ -731,28 +727,6 @@ fn solve_internal_cached_brent(
         #[cfg(test)]
         evaluations: root.evaluations,
     })
-}
-
-/// Solves pH with the compatibility-preserving cached Brent implementation.
-fn solve_internal(
-    temp: f64,
-    ionic_strength: Option<f64>,
-    kw: f64,
-    dependent_compounds: &[DependentCompound<'_>],
-    independent_compounds: &[IndependentCompound],
-    h_i: f64,
-    oh_i: f64,
-) -> SolverResult<f64> {
-    solve_internal_cached_brent(
-        temp,
-        ionic_strength,
-        kw,
-        dependent_compounds,
-        independent_compounds,
-        h_i,
-        oh_i,
-    )
-    .map(|outcome| outcome.ph)
 }
 
 /// Retains the previous concentration-space Brent solver as a test oracle.
@@ -1367,34 +1341,16 @@ mod tests {
         let compounds = [compound];
         let lower_h = 1e-14;
         let lower_oh = 1e-14 / lower_h;
-        let lower = solve_internal_newton_candidate(
-            25.0,
-            None,
-            1e-14,
-            &compounds,
-            &[],
-            0.0,
-            lower_oh - lower_h,
-        )
-        .unwrap();
+        let lower =
+            solve_internal(25.0, None, 1e-14, &compounds, &[], 0.0, lower_oh - lower_h).unwrap();
         assert!((lower - 14.0).abs() < 1e-11);
 
         let upper_h = 1.0;
         let upper_oh = 1e-14 / upper_h;
-        let upper = solve_internal_newton_candidate(
-            25.0,
-            None,
-            1e-14,
-            &compounds,
-            &[],
-            upper_h - upper_oh,
-            0.0,
-        )
-        .unwrap();
+        let upper =
+            solve_internal(25.0, None, 1e-14, &compounds, &[], upper_h - upper_oh, 0.0).unwrap();
         assert!(upper.abs() < 1e-11);
-        assert!(
-            solve_internal_newton_candidate(25.0, None, 1e-14, &compounds, &[], 2.0, 0.0).is_err()
-        );
+        assert!(solve_internal(25.0, None, 1e-14, &compounds, &[], 2.0, 0.0).is_err());
     }
 
     #[test]
@@ -1450,7 +1406,7 @@ mod tests {
             let compounds = [compound];
             let target_oh = 1e-14 / (target_h * gammas[1] * gammas[1]);
 
-            let newton_result = solve_internal_newton_candidate(
+            let newton_result = solve_internal(
                 temp,
                 ionic_strength,
                 1e-14,
