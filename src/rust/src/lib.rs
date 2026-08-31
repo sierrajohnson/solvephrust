@@ -2,9 +2,6 @@ use extendr_api::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-#[cfg(test)]
-use roots::{find_root_brent, SimpleConvergency};
-
 // Substantial portions of this code are based on Brown and Caldwell's TidyWater package.
 // Copyright (c) 2025 Brown and Caldwell
 // MIT License
@@ -14,10 +11,6 @@ type SolverResult<T> = std::result::Result<T, String>;
 
 /// Bounds stack storage because the public schema supports at most three steps.
 const MAX_SPECIES: usize = 4;
-
-/// Bounds dissociation-constant storage to one fewer entry than species storage.
-#[cfg(test)]
-const MAX_CONSTANTS: usize = MAX_SPECIES - 1;
 
 /// Lower endpoint of the existing hydrogen-concentration search interval.
 const LOG_H_MIN: f64 = -14.0 * std::f64::consts::LN_10;
@@ -34,10 +27,6 @@ const MAX_ROOT_ITERATIONS: usize = 100;
 /// Stores one dissociation step after its R definition has been validated.
 #[derive(Debug, Clone, Copy)]
 struct Ion {
-    #[cfg(test)]
-    k: f64,
-    #[cfg(test)]
-    delta_h: f64,
     ln_k: f64,
     delta_h_over_r: f64,
 }
@@ -46,10 +35,6 @@ impl Ion {
     /// Caches log-space temperature terms once when catalog chemistry is parsed.
     fn new(k: f64, delta_h: f64) -> Self {
         Self {
-            #[cfg(test)]
-            k,
-            #[cfg(test)]
-            delta_h,
             ln_k: k.ln(),
             delta_h_over_r: delta_h / 8.314,
         }
@@ -84,24 +69,6 @@ struct DependentDefinition {
 #[derive(Debug, Clone, Copy)]
 struct IndependentDefinition {
     charge: i8,
-}
-
-/// Combines cached chemistry with concentrations supplied for one solve call.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-struct DependentCompound<'a> {
-    ions: &'a [Ion],
-    charge_direction: ChargeDirection,
-    total: f64,
-    initial: [f64; MAX_CONSTANTS],
-}
-
-/// Holds one fixed-charge dose in the form needed by the charge balance.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-struct IndependentCompound {
-    charge: i8,
-    dose: f64,
 }
 
 /// Reuses invocation-sized buffers so successful solves do not allocate.
@@ -148,22 +115,6 @@ struct SolverConfig {
     independent_definitions: Vec<IndependentDefinition>,
     independent_index: HashMap<Box<str>, usize>,
     scratch: RefCell<SolveScratch>,
-}
-
-/// Keeps the small set of species fractions on the stack during root finding.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy)]
-struct AlphaFractions {
-    values: [f64; MAX_SPECIES],
-    len: usize,
-}
-
-#[cfg(test)]
-impl AlphaFractions {
-    /// Exposes only the entries populated for the compound's actual valence.
-    fn as_slice(&self) -> &[f64] {
-        &self.values[..self.len]
-    }
 }
 
 /// Stores cumulative corrected log constants for repeated root evaluations.
@@ -280,14 +231,6 @@ fn activity_coefficients(ionic_strength: Option<f64>, temp: f64) -> [f64; MAX_SP
     [1.0, gamma_one, gamma_one.powi(4), gamma_one.powi(9)]
 }
 
-/// Moves a 25 °C equilibrium constant to the requested temperature.
-#[cfg(test)]
-fn k_temp_adjust(delta_h: f64, k: f64, temp: f64) -> f64 {
-    let gas_constant = 8.314;
-    let temp_abs = temp + 273.15;
-    ((delta_h / gas_constant * (1.0 / 298.15 - 1.0 / temp_abs)) + k.ln()).exp()
-}
-
 /// Identifies each dissociation transition so its activity correction uses the
 /// correct reactant and product charges in Benjamin's distance-from-neutral order.
 fn ion_charges(direction: ChargeDirection, ion_index: usize) -> (i8, i8) {
@@ -295,46 +238,6 @@ fn ion_charges(direction: ChargeDirection, ion_index: usize) -> (i8, i8) {
     match direction {
         ChargeDirection::Negative => (-(charge_magnitude - 1), -charge_magnitude),
         ChargeDirection::Positive => (charge_magnitude, charge_magnitude - 1),
-    }
-}
-
-/// Applies temperature and activity corrections once before root iteration.
-#[cfg(test)]
-fn correct_k(
-    compound: &DependentCompound<'_>,
-    temp: f64,
-    gammas: &[f64; MAX_SPECIES],
-) -> [f64; MAX_CONSTANTS] {
-    let gamma_h = gammas[1];
-    let mut corrected = [0.0; MAX_CONSTANTS];
-    for (ion_index, ion) in compound.ions.iter().enumerate() {
-        let (reactant_charge, product_charge) = ion_charges(compound.charge_direction, ion_index);
-        let temperature_corrected_k = k_temp_adjust(ion.delta_h, ion.k, temp);
-        let reactant_activity = gammas[usize::from(reactant_charge.unsigned_abs())];
-        let product_activity = gammas[usize::from(product_charge.unsigned_abs())];
-        corrected[ion_index] =
-            temperature_corrected_k * reactant_activity / (gamma_h * product_activity);
-    }
-    corrected
-}
-
-/// Converts corrected constants into cumulative logs used by every root step.
-#[cfg(test)]
-fn prepare_compound(
-    compound: &DependentCompound<'_>,
-    temp: f64,
-    gammas: &[f64; MAX_SPECIES],
-) -> PreparedCompound {
-    let corrected = correct_k(compound, temp, gammas);
-    let mut cumulative_log_k = [0.0; MAX_SPECIES];
-    for index in 0..compound.ions.len() {
-        cumulative_log_k[index + 1] = cumulative_log_k[index] + corrected[index].ln();
-    }
-    PreparedCompound {
-        cumulative_log_k,
-        len: compound.ions.len() + 1,
-        charge_direction: compound.charge_direction,
-        total: compound.total,
     }
 }
 
@@ -393,100 +296,6 @@ fn charge_moments(compound: &PreparedCompound, log_h: f64) -> ChargeMoments {
         charge: f64::from(compound.charge_direction.sign()) * compound.total * mean,
         derivative: compound.total * variance,
     }
-}
-
-/// Alpha fractions indexed by distance from neutral charge.
-///
-/// For negative compounds each step ratio is K_i / [H+]. For positive
-/// compounds it is [H+] / K_i because K_i describes dissociation from charge
-/// +i toward charge +(i-1). This exists to provide all species fractions needed
-/// by charge balance while log-space normalization keeps extreme cases stable.
-#[cfg(test)]
-fn calculate_alphas(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFractions {
-    let len = ks.len() + 1;
-    debug_assert!(len <= MAX_SPECIES);
-    let log_h = h.ln();
-    let mut cumulative_log_weight = 0.0;
-    let mut weights = [0.0; MAX_SPECIES];
-    for (index, k) in ks.iter().enumerate() {
-        cumulative_log_weight += match direction {
-            ChargeDirection::Negative => k.ln() - log_h,
-            ChargeDirection::Positive => log_h - k.ln(),
-        };
-        weights[index + 1] = cumulative_log_weight;
-    }
-    let maximum = weights[..len]
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
-    let mut total_weight = 0.0;
-    for weight in &mut weights[..len] {
-        *weight = (*weight - maximum).exp();
-        total_weight += *weight;
-    }
-    for weight in &mut weights[..len] {
-        *weight /= total_weight;
-    }
-    AlphaFractions {
-        values: weights,
-        len,
-    }
-}
-
-/// Direct-arithmetic equivalent of [`calculate_alphas`].
-///
-/// This version is retained as a readable statement of the equilibrium
-/// equations, but is deliberately not used by the solver because cumulative
-/// products can overflow or underflow for extreme constants or pH values.
-#[allow(dead_code)]
-#[cfg(test)]
-fn calculate_alphas_without_logs(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFractions {
-    let len = ks.len() + 1;
-    debug_assert!(len <= MAX_SPECIES);
-    let mut cumulative_weight = 1.0;
-    let mut weights = [0.0; MAX_SPECIES];
-    weights[0] = cumulative_weight;
-    for (index, k) in ks.iter().enumerate() {
-        cumulative_weight *= match direction {
-            ChargeDirection::Negative => k / h,
-            ChargeDirection::Positive => h / k,
-        };
-        weights[index + 1] = cumulative_weight;
-    }
-    let total_weight: f64 = weights[..len].iter().sum();
-    for weight in &mut weights[..len] {
-        *weight /= total_weight;
-    }
-    AlphaFractions {
-        values: weights,
-        len,
-    }
-}
-
-/// Converts species fractions into the compound's equilibrium charge contribution.
-#[cfg(test)]
-fn equilibrium_charge(compound: &DependentCompound<'_>, alphas: &AlphaFractions) -> f64 {
-    let signed_fraction: f64 = alphas
-        .as_slice()
-        .iter()
-        .enumerate()
-        .map(|(charge_magnitude, alpha)| {
-            f64::from(compound.charge_direction.sign()) * charge_magnitude as f64 * alpha
-        })
-        .sum();
-    compound.total * signed_fraction
-}
-
-/// Reconstructs charge present before equilibration from the supplied ion states.
-#[cfg(test)]
-fn initial_charge(compound: &DependentCompound<'_>) -> f64 {
-    compound.initial[..compound.ions.len()]
-        .iter()
-        .enumerate()
-        .map(|(index, concentration)| {
-            concentration * f64::from(compound.charge_direction.sign()) * (index + 1) as f64
-        })
-        .sum()
 }
 
 /// Finds the unique root with Newton steps guarded by a persistent bracket.
@@ -577,107 +386,6 @@ fn find_root_safeguarded(balance: &ChargeBalance<'_>) -> SolverResult<RootSoluti
     Err("The pH solver failed to converge to a solution on [0, 14].".to_string())
 }
 
-/// Orders Brent endpoints so the better residual is the second point.
-#[cfg(test)]
-fn arrange_points(a: f64, fa: f64, b: f64, fb: f64) -> (f64, f64, f64, f64) {
-    if fa.abs() > fb.abs() {
-        (a, fa, b, fb)
-    } else {
-        (b, fb, a, fa)
-    }
-}
-
-/// Provides a cached-evaluation log-space Brent candidate for comparisons.
-#[cfg(test)]
-fn find_root_log_brent(balance: &ChargeBalance<'_>) -> SolverResult<RootSolution> {
-    let mut evaluations = 0;
-    let mut evaluate = |log_h| {
-        evaluations += 1;
-        balance.evaluate(log_h).balance
-    };
-    let fa = evaluate(LOG_H_MIN);
-    let fb = evaluate(LOG_H_MAX);
-    let (mut a, mut fa, mut b, mut fb) = arrange_points(LOG_H_MIN, fa, LOG_H_MAX, fb);
-    if !fa.is_finite() || !fb.is_finite() || fa * fb > 0.0 {
-        return Err("The pH solver failed to converge to a solution on [0, 14].".to_string());
-    }
-    let (mut c, mut fc, mut d) = (a, fa, a);
-    let mut bisected = true;
-
-    for _ in 0..MAX_ROOT_ITERATIONS {
-        if fa == 0.0 {
-            return Ok(RootSolution {
-                log_h: a,
-                evaluations,
-            });
-        }
-        if fb == 0.0 || (a - b).abs() <= LOG_H_TOLERANCE {
-            return Ok(RootSolution {
-                log_h: b,
-                evaluations,
-            });
-        }
-        let mut candidate = if fa != fc && fb != fc {
-            a * fb * fc / ((fa - fb) * (fa - fc))
-                + b * fa * fc / ((fb - fa) * (fb - fc))
-                + c * fa * fb / ((fc - fa) * (fc - fb))
-        } else {
-            b - fb * (b - a) / (fb - fa)
-        };
-        let outside_safe_region = (candidate - b) * (candidate - (3.0 * a + b) / 4.0) > 0.0;
-        let insufficient_progress = bisected && (candidate - b).abs() >= (b - c).abs() / 2.0;
-        let prior_insufficient_progress = !bisected && (candidate - b).abs() >= (c - d).abs() / 2.0;
-        let stale_bisection = bisected && (b - c).abs() <= LOG_H_TOLERANCE;
-        let stale_interpolation = !bisected && (c - d).abs() <= LOG_H_TOLERANCE;
-        if outside_safe_region
-            || insufficient_progress
-            || prior_insufficient_progress
-            || stale_bisection
-            || stale_interpolation
-        {
-            candidate = (a + b) / 2.0;
-            bisected = true;
-        } else {
-            bisected = false;
-        }
-
-        let candidate_balance = evaluate(candidate);
-        d = c;
-        c = b;
-        fc = fb;
-        if fa * candidate_balance < 0.0 {
-            (a, fa, b, fb) = arrange_points(a, fa, candidate, candidate_balance);
-        } else {
-            (a, fa, b, fb) = arrange_points(candidate, candidate_balance, b, fb);
-        }
-    }
-    Err("The pH solver failed to converge to a solution on [0, 14].".to_string())
-}
-
-/// Prepares a charge balance shared by production and reference root solvers.
-#[cfg(test)]
-fn prepare_balance<'a>(
-    temp: f64,
-    ionic_strength: Option<f64>,
-    dependent_compounds: &[DependentCompound<'a>],
-    independent_compounds: &[IndependentCompound],
-    h_i: f64,
-    oh_i: f64,
-) -> (Vec<PreparedCompound>, f64, f64, f64) {
-    let gammas = activity_coefficients(ionic_strength, temp);
-    let prepared: Vec<PreparedCompound> = dependent_compounds
-        .iter()
-        .map(|compound| prepare_compound(compound, temp, &gammas))
-        .collect();
-    let gamma_h = gammas[1];
-    let dose_charge: f64 = independent_compounds
-        .iter()
-        .map(|compound| f64::from(compound.charge) * compound.dose)
-        .sum();
-    let starting_charge = h_i - oh_i + dependent_compounds.iter().map(initial_charge).sum::<f64>();
-    (prepared, gamma_h, dose_charge, starting_charge)
-}
-
 /// Runs Newton from an already prepared charge balance without allocating.
 fn solve_prepared(
     kw: f64,
@@ -696,84 +404,6 @@ fn solve_prepared(
     };
     let root = find_root_safeguarded(&balance)?;
     Ok(-(root.log_h + log_gamma_h) / std::f64::consts::LN_10)
-}
-
-/// Solves pH with safeguarded Newton iteration in log-hydrogen space.
-#[cfg(test)]
-fn solve_internal(
-    temp: f64,
-    ionic_strength: Option<f64>,
-    kw: f64,
-    dependent_compounds: &[DependentCompound<'_>],
-    independent_compounds: &[IndependentCompound],
-    h_i: f64,
-    oh_i: f64,
-) -> SolverResult<f64> {
-    let (prepared, gamma_h, dose_charge, starting_charge) = prepare_balance(
-        temp,
-        ionic_strength,
-        dependent_compounds,
-        independent_compounds,
-        h_i,
-        oh_i,
-    );
-    solve_prepared(
-        kw,
-        &prepared,
-        gamma_h,
-        gamma_h.ln(),
-        dose_charge,
-        starting_charge,
-    )
-}
-
-/// Retains the previous concentration-space Brent solver as a test oracle.
-#[cfg(test)]
-fn solve_internal_brent_reference(
-    temp: f64,
-    ionic_strength: Option<f64>,
-    kw: f64,
-    dependent_compounds: &[DependentCompound<'_>],
-    independent_compounds: &[IndependentCompound],
-    h_i: f64,
-    oh_i: f64,
-) -> SolverResult<(f64, usize)> {
-    let gammas = activity_coefficients(ionic_strength, temp);
-    let corrected_ks: Vec<[f64; MAX_CONSTANTS]> = dependent_compounds
-        .iter()
-        .map(|compound| correct_k(compound, temp, &gammas))
-        .collect();
-    let gamma_h = gammas[1];
-    let dose_charge: f64 = independent_compounds
-        .iter()
-        .map(|compound| f64::from(compound.charge) * compound.dose)
-        .sum();
-    let starting_charge = h_i - oh_i + dependent_compounds.iter().map(initial_charge).sum::<f64>();
-    let mut evaluations = 0;
-    let charge_balance = |h: f64| {
-        evaluations += 1;
-        let oh = kw / (h * gamma_h * gamma_h);
-        let dependent_charge: f64 = dependent_compounds
-            .iter()
-            .zip(&corrected_ks)
-            .map(|(compound, corrected)| {
-                let alphas = calculate_alphas(
-                    h,
-                    &corrected[..compound.ions.len()],
-                    compound.charge_direction,
-                );
-                equilibrium_charge(compound, &alphas)
-            })
-            .sum();
-        h - oh + dependent_charge + dose_charge - starting_charge
-    };
-    let mut convergency = SimpleConvergency {
-        eps: 1e-14,
-        max_iter: 1000,
-    };
-    let h = find_root_brent(1e-14, 1.0, charge_balance, &mut convergency)
-        .map_err(|_| "The pH solver failed to converge to a solution on [0, 14].".to_string())?;
-    Ok((-(h * gamma_h).log10(), evaluations))
 }
 
 /// Requires an R value to be a list while preserving its location in errors.
@@ -1301,6 +931,80 @@ extendr_module! {
 mod tests {
     use super::*;
 
+    /// Keeps the small set of reference species fractions on the stack.
+    #[derive(Debug, Clone, Copy)]
+    struct AlphaFractions {
+        values: [f64; MAX_SPECIES],
+        len: usize,
+    }
+
+    impl AlphaFractions {
+        /// Exposes only entries populated for the compound's actual valence.
+        fn as_slice(&self) -> &[f64] {
+            &self.values[..self.len]
+        }
+    }
+
+    /// Calculates stable reference alphas indexed by distance from neutral.
+    fn calculate_alphas(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFractions {
+        let len = ks.len() + 1;
+        debug_assert!(len <= MAX_SPECIES);
+        let log_h = h.ln();
+        let mut cumulative_log_weight = 0.0;
+        let mut weights = [0.0; MAX_SPECIES];
+        for (index, k) in ks.iter().enumerate() {
+            cumulative_log_weight += match direction {
+                ChargeDirection::Negative => k.ln() - log_h,
+                ChargeDirection::Positive => log_h - k.ln(),
+            };
+            weights[index + 1] = cumulative_log_weight;
+        }
+        let maximum = weights[..len]
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut total_weight = 0.0;
+        for weight in &mut weights[..len] {
+            *weight = (*weight - maximum).exp();
+            total_weight += *weight;
+        }
+        for weight in &mut weights[..len] {
+            *weight /= total_weight;
+        }
+        AlphaFractions {
+            values: weights,
+            len,
+        }
+    }
+
+    /// States the equivalent direct alpha equations for readability checks.
+    fn calculate_alphas_without_logs(
+        h: f64,
+        ks: &[f64],
+        direction: ChargeDirection,
+    ) -> AlphaFractions {
+        let len = ks.len() + 1;
+        debug_assert!(len <= MAX_SPECIES);
+        let mut cumulative_weight = 1.0;
+        let mut weights = [0.0; MAX_SPECIES];
+        weights[0] = cumulative_weight;
+        for (index, k) in ks.iter().enumerate() {
+            cumulative_weight *= match direction {
+                ChargeDirection::Negative => k / h,
+                ChargeDirection::Positive => h / k,
+            };
+            weights[index + 1] = cumulative_weight;
+        }
+        let total_weight: f64 = weights[..len].iter().sum();
+        for weight in &mut weights[..len] {
+            *weight /= total_weight;
+        }
+        AlphaFractions {
+            values: weights,
+            len,
+        }
+    }
+
     /// Supplies reproducible pseudo-random values without adding a dependency.
     struct TestRng(u64);
 
@@ -1384,61 +1088,56 @@ mod tests {
 
     #[test]
     fn charge_direction_selects_opposite_limiting_states() {
-        let ions = [Ion::new(1e-7, 0.0)];
-        let negative = DependentCompound {
-            ions: &ions,
+        let negative = PreparedCompound {
+            cumulative_log_k: [0.0, 1e-7_f64.ln(), 0.0, 0.0],
+            len: 2,
             charge_direction: ChargeDirection::Negative,
             total: 1.0,
-            initial: [0.0; MAX_CONSTANTS],
         };
-        let positive = DependentCompound {
+        let positive = PreparedCompound {
             charge_direction: ChargeDirection::Positive,
-            ..negative.clone()
+            ..negative
         };
-        let acidic_negative = calculate_alphas(1.0, &[1e-7], ChargeDirection::Negative);
-        let basic_negative = calculate_alphas(1e-14, &[1e-7], ChargeDirection::Negative);
-        let acidic_positive = calculate_alphas(1.0, &[1e-7], ChargeDirection::Positive);
-        let basic_positive = calculate_alphas(1e-14, &[1e-7], ChargeDirection::Positive);
-        assert!(equilibrium_charge(&negative, &acidic_negative).abs() < 1e-6);
-        assert!((equilibrium_charge(&negative, &basic_negative) + 1.0).abs() < 1e-6);
-        assert!((equilibrium_charge(&positive, &acidic_positive) - 1.0).abs() < 1e-6);
-        assert!(equilibrium_charge(&positive, &basic_positive).abs() < 1e-6);
+        assert!(charge_moments(&negative, 0.0).charge.abs() < 1e-6);
+        assert!((charge_moments(&negative, 1e-14_f64.ln()).charge + 1.0).abs() < 1e-6);
+        assert!((charge_moments(&positive, 0.0).charge - 1.0).abs() < 1e-6);
+        assert!(charge_moments(&positive, 1e-14_f64.ln()).charge.abs() < 1e-6);
     }
 
     #[test]
     fn activity_correction_uses_transition_charge_states() {
-        let ions = [Ion::new(1e-7, 0.0)];
-        let negative = DependentCompound {
-            ions: &ions,
+        let negative = DependentDefinition {
+            ions: vec![Ion::new(1e-7, 0.0)],
             charge_direction: ChargeDirection::Negative,
-            total: 0.0,
-            initial: [0.0; MAX_CONSTANTS],
         };
-        let positive = DependentCompound {
+        let positive = DependentDefinition {
+            ions: vec![Ion::new(1e-7, 0.0)],
             charge_direction: ChargeDirection::Positive,
-            ..negative.clone()
         };
         let ionic_strength = Some(0.1);
         let gamma_one = calculate_activity(1, ionic_strength, 25.0);
         let coefficients = activity_coefficients(ionic_strength, 25.0);
+        let log_gamma_one = gamma_one.ln();
+        let log_gammas = [0.0, log_gamma_one, 4.0 * log_gamma_one, 9.0 * log_gamma_one];
         assert!((coefficients[2] - calculate_activity(2, ionic_strength, 25.0)).abs() < 1e-15);
         assert!((coefficients[3] - calculate_activity(3, ionic_strength, 25.0)).abs() < 1e-15);
-        let negative_k = correct_k(&negative, 25.0, &coefficients)[0];
-        let positive_k = correct_k(&positive, 25.0, &coefficients)[0];
+        let negative_prepared = prepare_definition(&negative, 25.0, &log_gammas);
+        let positive_prepared = prepare_definition(&positive, 25.0, &log_gammas);
+        let negative_k = negative_prepared.cumulative_log_k[1].exp();
+        let positive_k = positive_prepared.cumulative_log_k[1].exp();
         assert!((negative_k - 1e-7 / gamma_one.powi(2)).abs() < 1e-20);
         assert!((positive_k - 1e-7).abs() < 1e-20);
 
-        let dipositive_ions = [Ion::new(1e-7, 0.0), Ion::new(1e-9, 0.0)];
-        let dipositive = DependentCompound {
-            ions: &dipositive_ions,
+        let dipositive = DependentDefinition {
+            ions: vec![Ion::new(1e-7, 0.0), Ion::new(1e-9, 0.0)],
             charge_direction: ChargeDirection::Positive,
-            total: 0.0,
-            initial: [0.0; MAX_CONSTANTS],
         };
-        let corrected = correct_k(&dipositive, 25.0, &coefficients);
+        let corrected = prepare_definition(&dipositive, 25.0, &log_gammas);
+        let corrected_k1 = corrected.cumulative_log_k[1].exp();
+        let corrected_k2 = (corrected.cumulative_log_k[2] - corrected.cumulative_log_k[1]).exp();
         let gamma_two = calculate_activity(2, ionic_strength, 25.0);
-        assert!((corrected[0] - 1e-7).abs() < 1e-20);
-        assert!((corrected[1] - 1e-9 * gamma_two / gamma_one.powi(2)).abs() < 1e-20);
+        assert!((corrected_k1 - 1e-7).abs() < 1e-20);
+        assert!((corrected_k2 - 1e-9 * gamma_two / gamma_one.powi(2)).abs() < 1e-20);
     }
 
     #[test]
@@ -1485,39 +1184,25 @@ mod tests {
 
     #[test]
     fn safeguarded_solver_handles_domain_boundaries_and_no_bracket() {
-        let ions = [Ion::new(1e-7, 0.0)];
-        let compound = DependentCompound {
-            ions: &ions,
-            charge_direction: ChargeDirection::Negative,
-            total: 0.0,
-            initial: [0.0; MAX_CONSTANTS],
-        };
-        let compounds = [compound];
         let lower_h = 1e-14;
         let lower_oh = 1e-14 / lower_h;
-        let lower =
-            solve_internal(25.0, None, 1e-14, &compounds, &[], 0.0, lower_oh - lower_h).unwrap();
+        let lower = solve_prepared(1e-14, &[], 1.0, 0.0, 0.0, lower_h - lower_oh).unwrap();
         assert!((lower - 14.0).abs() < 1e-11);
 
         let upper_h = 1.0;
         let upper_oh = 1e-14 / upper_h;
-        let upper =
-            solve_internal(25.0, None, 1e-14, &compounds, &[], upper_h - upper_oh, 0.0).unwrap();
+        let upper = solve_prepared(1e-14, &[], 1.0, 0.0, 0.0, upper_h - upper_oh).unwrap();
         assert!(upper.abs() < 1e-11);
-        assert!(solve_internal(25.0, None, 1e-14, &compounds, &[], 2.0, 0.0).is_err());
+        assert!(solve_prepared(1e-14, &[], 1.0, 0.0, 0.0, 2.0).is_err());
     }
 
     #[test]
-    fn root_solvers_agree_for_deterministic_random_chemistry() {
+    fn newton_solves_deterministic_random_chemistry() {
         let mut rng = TestRng(0x5eed_fade_cafe_beef);
         let mut newton_evaluations = Vec::new();
-        let mut log_brent_evaluations = Vec::new();
-        let mut legacy_evaluations = Vec::new();
-        let mut legacy_accurate_cases = 0;
-        let mut largest_legacy_error = 0.0_f64;
 
         for case_index in 0..2_000 {
-            let valence = case_index % MAX_CONSTANTS + 1;
+            let valence = case_index % (MAX_SPECIES - 1) + 1;
             let direction = if case_index % 2 == 0 {
                 ChargeDirection::Negative
             } else {
@@ -1541,89 +1226,53 @@ mod tests {
             let target_log_h = -(0.05 + 13.9 * rng.next()) * std::f64::consts::LN_10;
             let target_h = target_log_h.exp();
             let gammas = activity_coefficients(ionic_strength, temp);
-            let empty_initial = [0.0; MAX_CONSTANTS];
-            let uninitialized = DependentCompound {
-                ions: &ions,
+            let log_gamma_h = gammas[1].ln();
+            let log_gammas = [0.0, log_gamma_h, 4.0 * log_gamma_h, 9.0 * log_gamma_h];
+            let definition = DependentDefinition {
+                ions,
                 charge_direction: direction,
-                total,
-                initial: empty_initial,
             };
-            let corrected = correct_k(&uninitialized, temp, &gammas);
-            let alphas = calculate_alphas(target_h, &corrected[..valence], direction);
-            let mut initial = [0.0; MAX_CONSTANTS];
-            for (index, alpha) in alphas.as_slice()[1..].iter().enumerate() {
-                initial[index] = total * alpha;
-            }
-            let compound = DependentCompound {
-                initial,
-                ..uninitialized
-            };
-            let compounds = [compound];
+            let mut prepared = prepare_definition(&definition, temp, &log_gammas);
+            prepared.total = total;
+            let corrected: Vec<f64> = (0..valence)
+                .map(|index| {
+                    (prepared.cumulative_log_k[index + 1] - prepared.cumulative_log_k[index]).exp()
+                })
+                .collect();
+            let alphas = calculate_alphas(target_h, &corrected, direction);
+            let initial_dependent_charge: f64 = alphas.as_slice()[1..]
+                .iter()
+                .enumerate()
+                .map(|(index, alpha)| {
+                    total * alpha * f64::from(direction.sign()) * (index + 1) as f64
+                })
+                .sum();
             let target_oh = 1e-14 / (target_h * gammas[1] * gammas[1]);
 
-            let newton_result = solve_internal(
-                temp,
-                ionic_strength,
-                1e-14,
-                &compounds,
-                &[],
-                target_h,
-                target_oh,
-            )
-            .unwrap();
-            let expected = -(target_log_h + gammas[1].ln()) / std::f64::consts::LN_10;
-            assert!(
-                (newton_result - expected).abs() <= 1e-10,
-                "case={case_index} newton={newton_result:.16} expected={expected:.16} difference={:.3e}",
-                (newton_result - expected).abs()
-            );
-            let (legacy, legacy_count) = solve_internal_brent_reference(
-                temp,
-                ionic_strength,
-                1e-14,
-                &compounds,
-                &[],
-                target_h,
-                target_oh,
-            )
-            .unwrap();
-            let legacy_error = (legacy - expected).abs();
-            largest_legacy_error = largest_legacy_error.max(legacy_error);
-            if legacy_error <= 1e-10 {
-                legacy_accurate_cases += 1;
-                assert!((newton_result - legacy).abs() <= 1e-10);
-            }
-
-            let (prepared, gamma_h, dose_charge, starting_charge) =
-                prepare_balance(temp, ionic_strength, &compounds, &[], target_h, target_oh);
+            let expected = -(target_log_h + log_gamma_h) / std::f64::consts::LN_10;
+            let compounds = [prepared];
             let balance = ChargeBalance {
-                compounds: &prepared,
+                compounds: &compounds,
                 kw: 1e-14,
-                gamma_h,
-                dose_charge,
-                starting_charge,
+                gamma_h: gammas[1],
+                dose_charge: 0.0,
+                starting_charge: target_h - target_oh + initial_dependent_charge,
             };
             let newton = find_root_safeguarded(&balance).unwrap();
-            let log_brent = find_root_log_brent(&balance).unwrap();
-            let newton_ph = -(newton.log_h + gamma_h.ln()) / std::f64::consts::LN_10;
-            let log_brent_ph = -(log_brent.log_h + gamma_h.ln()) / std::f64::consts::LN_10;
-            assert!((log_brent_ph - expected).abs() <= 1e-10);
-            assert!((newton_ph - log_brent_ph).abs() <= 1e-10);
+            let newton_ph = -(newton.log_h + log_gamma_h) / std::f64::consts::LN_10;
+            assert!(
+                (newton_ph - expected).abs() <= 1e-10,
+                "case={case_index} newton={newton_ph:.16} expected={expected:.16} difference={:.3e}",
+                (newton_ph - expected).abs()
+            );
             newton_evaluations.push(newton.evaluations);
-            log_brent_evaluations.push(log_brent.evaluations);
-            legacy_evaluations.push(legacy_count);
         }
 
         let newton_median = percentile(&mut newton_evaluations, 0.5);
         let newton_p95 = percentile(&mut newton_evaluations, 0.95);
         let newton_max = *newton_evaluations.iter().max().unwrap();
-        let log_brent_median = percentile(&mut log_brent_evaluations, 0.5);
-        let legacy_median = percentile(&mut legacy_evaluations, 0.5);
-        eprintln!(
-            "evaluations: newton median={newton_median} p95={newton_p95} max={newton_max}; log-brent median={log_brent_median}; legacy median={legacy_median}; legacy accurate={legacy_accurate_cases}/2000 largest error={largest_legacy_error:.3e} pH"
-        );
-        assert!(legacy_accurate_cases > 1_000);
-        assert!(newton_median < log_brent_median);
-        assert!(newton_median < legacy_median);
+        eprintln!("evaluations: newton median={newton_median} p95={newton_p95} max={newton_max}");
+        assert!(newton_p95 <= 20);
+        assert!(newton_max <= MAX_ROOT_ITERATIONS);
     }
 }

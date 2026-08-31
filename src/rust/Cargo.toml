@@ -12,9 +12,6 @@ name = 'solvephrust'
 [dependencies]
 extendr-api = '0.8.1'
 
-[dev-dependencies]
-roots = "0.0.8"
-
 [profile.release]
 lto = true
 codegen-units = 1
