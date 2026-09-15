@@ -1,0 +1,238 @@
+row_to_inputs <- function(row) {
+  list(
+    ph_dependent = list(
+      po4 = list(total = row$tot_po4,
+                 initial = list(row$h2po4_i, row$hpo4_i, row$po4_i)),
+      co3 = list(total = row$tot_co3,
+                 initial = list(row$carbonate_alk_eq, 0)),
+      ocl = list(total = row$tot_ocl, initial = list(row$ocl_i)),
+      nh3 = list(total = row$tot_nh3, initial = list(row$nh4_i)),
+      ch3coo = list(total = row$tot_ch3coo, initial = list(row$ch3coo_i))
+    ),
+    ph_independent = list(
+      so4 = row$so4_dose,
+      na = row$na_dose,
+      ca = row$ca_dose,
+      mg = row$mg_dose,
+      cl = row$cl_dose,
+      mno4 = row$mno4_dose,
+      no3 = row$no3_dose
+    )
+  )
+}
+
+test_that("default solver matches legacy CSV results at legacy precision", {
+  csv_path <- file.path("solve_ph_inputs_outputs.csv")
+  if (!file.exists(csv_path)) csv_path <- file.path("tests", "testthat", csv_path)
+  test_data <- read.csv(csv_path, stringsAsFactors = FALSE)
+  solver <- new_default_solver()
+
+  actual <- vapply(seq_len(nrow(test_data)), function(index) {
+    row <- test_data[index, ]
+    values <- row_to_inputs(row)
+    solve(solver, temp = row$temp, kw = row$kw,
+          ionic_strength = if (is.na(row$ionic_strength)) NULL else row$ionic_strength,
+          ph_dependent = values$ph_dependent,
+          ph_independent = values$ph_independent,
+          h_i = row$h_i, oh_i = row$oh_i)
+  }, numeric(1))
+
+  newton_full_precision <- c(
+    7.50000000000002, 5.58148635197893, 10.4142491478273, 11.4955114381775,
+    10.4142491478273, 5.58148635197893, 6.77544140531155, 6.39542366432063,
+    11.1545113997728, 8.99999999999999, 6.37314914848028, 10.3121466803858,
+    11.5661341075785, 10.3121466803858, 6.37314914848028, 7.39529830969526,
+    6.90291149701869, 11.0961506483821, 6, 3.02629190060507,
+    8.24525138898043, 10.9400658259522, 8.24525138898043, 3.02629190060507,
+    5.603718600782, 4.42362598330093, 10.3012639324546, 7,
+    4.47660899143716, 10.3325931463915, 11.4834580536125, 10.3325931463915,
+    4.47660899143716, 6.53045546692531, 6.16450357384107, 11.1251858414784,
+    7.19999999999999, 4.49465527119014, 10.4544563480117, 11.518886283035,
+    10.4544563480117, 4.49465527119014, 6.61358563096248, 6.21706520063784,
+    11.19359888372, 7.80242351415299, 4.12935115098265, 10.6249790237762,
+    11.5638754323231, 10.6249790237762, 4.12935115098265, 6.72749963407484,
+    6.26191603104365, 11.2766821318243
+  )
+  expect_equal(actual, newton_full_precision, tolerance = 1e-10)
+  expect_equal(round(actual, 2), test_data$ph_r_backend, tolerance = 0.01)
+  expect_true(any(actual != round(actual, 2)))
+})
+
+test_that("constructors return fresh owning Rust pointers", {
+  first <- new_default_solver()
+  second <- new_default_solver()
+  expect_s3_class(first, "solvephrust_solver")
+  expect_type(first, "externalptr")
+  expect_type(second, "externalptr")
+  expect_false(identical(first, second))
+})
+
+test_that("an aliased pointer keeps the Rust configuration alive", {
+  solver <- new_default_solver()
+  alias <- solver
+  rm(solver)
+  gc()
+  result <- solve(
+    alias, temp = 25, kw = 1e-14,
+    ph_dependent = list(co3 = list(total = 0, initial = list(0, 0))),
+    h_i = 1e-7, oh_i = 1e-7
+  )
+  expect_equal(result, 7, tolerance = 1e-6)
+})
+
+test_that("solver pointers are intentionally not serializable", {
+  restored <- unserialize(serialize(new_default_solver(), NULL))
+  expect_error(
+    solve(
+      restored, temp = 25, kw = 1e-14,
+      ph_dependent = list(co3 = list(total = 0, initial = list(0, 0)))
+    ),
+    "non-null pointer"
+  )
+})
+
+test_that("custom compounds require no backend changes", {
+  solver <- new_solver(
+    ph_dependent = list(custom_acid = list(
+      constants = list(list(k = 1e-7, delta_h = 0)),
+      charge = -1
+    )),
+    ph_independent_charges = list(custom_cation = 1)
+  )
+  result <- solve(
+    solver, temp = 25, kw = 1e-14,
+    ph_dependent = list(custom_acid = list(total = 1e-3, initial = list(5e-4))),
+    ph_independent = list(custom_cation = 5e-4),
+    h_i = 1e-7, oh_i = 1e-7
+  )
+  expect_type(result, "double")
+  expect_true(is.finite(result))
+})
+
+test_that("multivalent positive constants are ordered by distance from neutral", {
+  solver <- new_solver(ph_dependent = list(dipositive = list(
+    constants = list(
+      list(k = 1e-5, delta_h = 0),  # +1 -> neutral
+      list(k = 1e-8, delta_h = 0)   # +2 -> +1
+    ),
+    charge = 1
+  )))
+  weights <- c(1, 1e-6 / 1e-5, (1e-6 / 1e-5) * (1e-6 / 1e-8))
+  alphas <- weights / sum(weights)
+  result <- solve(
+    solver, temp = 25, kw = 1e-14,
+    ph_dependent = list(dipositive = list(
+      total = 1,
+      initial = list(alphas[[2]], alphas[[3]])
+    )),
+    h_i = 1e-6, oh_i = 1e-8
+  )
+  expect_equal(result, 6, tolerance = 1e-6)
+})
+
+test_that("a solve requires at least one dependent compound", {
+  solver <- new_default_solver()
+  expect_error(solve(solver, temp = 25, kw = 1e-14), "at least one compound")
+  expect_error(solve(solver, 25, kw = 1e-14), "supplied by name")
+})
+
+test_that("borate and silicate defaults participate in equilibrium", {
+  solver <- new_default_solver()
+  result <- solve(
+    solver, temp = 25, kw = 1e-14,
+    ph_dependent = list(
+      bo3 = list(total = 1e-4, initial = list(0)),
+      sio4 = list(total = 1e-4, initial = list(0, 0))
+    ),
+    h_i = 1e-7, oh_i = 1e-7
+  )
+  expect_true(is.finite(result))
+})
+
+test_that("Rust validates and accepts R scalar representations", {
+  solver <- new_default_solver()
+  inputs <- list(co3 = list(total = 0, initial = list(0, 0)))
+  expect_true(is.finite(solve(
+    solver, temp = 25L, kw = 1e-14, ionic_strength = 0L,
+    ph_dependent = inputs, h_i = 1e-7, oh_i = 1e-7
+  )))
+  expect_error(solve(
+    solver, temp = NA_real_, kw = 1e-14, ph_dependent = inputs
+  ), "temp")
+  expect_error(solve(
+    solver, temp = 25, kw = 1e-14, ionic_strength = -0.1,
+    ph_dependent = inputs
+  ), "ionic_strength")
+})
+
+test_that("condition and name-order caches never change solve results", {
+  co3 <- list(total = 1e-3, initial = list(5e-4, 0))
+  po4 <- list(total = 2e-4, initial = list(1e-4, 1e-4, 0))
+  conditions <- list(
+    list(temp = 5, ionic_strength = NULL,
+         ph_dependent = list(co3 = co3, po4 = po4)),
+    list(temp = 35, ionic_strength = 0.1,
+         ph_dependent = list(po4 = po4, co3 = co3)),
+    list(temp = 5, ionic_strength = NULL,
+         ph_dependent = list(po4 = po4, co3 = co3))
+  )
+  shared <- new_default_solver()
+
+  for (condition in conditions) {
+    shared_result <- solve(
+      shared, temp = condition$temp, ionic_strength = condition$ionic_strength,
+      kw = 1e-14, ph_dependent = condition$ph_dependent,
+      h_i = 1e-7, oh_i = 1e-7
+    )
+    fresh_result <- solve(
+      new_default_solver(), temp = condition$temp,
+      ionic_strength = condition$ionic_strength, kw = 1e-14,
+      ph_dependent = condition$ph_dependent, h_i = 1e-7, oh_i = 1e-7
+    )
+    expect_equal(shared_result, fresh_result, tolerance = 1e-12)
+  }
+})
+
+test_that("constructor reports invalid schemas", {
+  step <- list(k = 1e-7, delta_h = 0)
+  expect_error(new_solver(ph_dependent = list(list(constants = list(step), charge = -1))),
+               "non-empty name")
+  expect_error(new_solver(ph_dependent = list(x = list(constants = list(), charge = -1))),
+               "non-empty list")
+  expect_error(new_solver(ph_dependent = list(x = list(constants = list(step), charge = 2))),
+               "either -1 or 1")
+  expect_error(new_solver(ph_independent_charges = list(x = 0)), "nonzero integer")
+  expect_error(new_solver(ph_dependent = list(x = list(
+    constants = rep(list(step), 4), charge = -1
+  ))), "one to three")
+  expect_error(new_solver(ph_dependent = list(x = list(constants = list(step), charge = -1)),
+                          ph_independent_charges = list(x = -1)), "cannot be both")
+})
+
+test_that("solve reports invalid runtime values", {
+  solver <- new_default_solver()
+  expect_error(solve(solver, temp = 25, kw = 1e-14,
+                     ph_dependent = list(unknown = list(total = 0, initial = list(0)))),
+               "Unknown compound")
+  expect_error(solve(solver, temp = 25, kw = 1e-14,
+                     ph_dependent = list(co3 = list(total = 0, initial = list(0)))),
+               "length 2")
+  expect_error(solve(solver, temp = 25, kw = 1e-14,
+                     ph_dependent = list(co3 = list(total = 0, initial = list(0, 0))),
+                     ph_independent = list(na = -1)), ">= 0")
+  expect_error(solve(solver, temp = -273.15, kw = 1e-14,
+                     ph_dependent = list(co3 = list(total = 0, initial = list(0, 0)))), "temp")
+  expect_error(solve(solver, temp = 25, kw = 0,
+                     ph_dependent = list(co3 = list(total = 0, initial = list(0, 0)))), "kw")
+  expect_error(solve(solver, temp = 25, kw = 1e-14,
+                     ph_dependent = list(co3 = list(total = 0, initial = list(0, 0))),
+                     ph_independent = list(na = 1000)),
+               "failed to converge")
+
+  duplicate_co3 <- setNames(list(
+    list(total = 0, initial = list(0, 0)),
+    list(total = 0, initial = list(0, 0))
+  ), c("co3", "co3"))
+  expect_error(solve(solver, temp = 25, kw = 1e-14,
+                     ph_dependent = duplicate_co3), "must be unique")
+})

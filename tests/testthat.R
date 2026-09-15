@@ -7,6 +7,6 @@
 # * https://testthat.r-lib.org/articles/special-files.html
 
 library(testthat)
-library(sovlephrust)
+library(solvephrust)
 
-test_check("sovlephrust")
+test_check("solvephrust")

@@ -1,608 +1,1278 @@
 use extendr_api::prelude::*;
-use roots::{find_root_brent, SimpleConvergency};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 // Substantial portions of this code are based on Brown and Caldwell's TidyWater package.
 // Copyright (c) 2025 Brown and Caldwell
 // MIT License
 
-// ============================================================================
-// Alpha calculation functions for chemical equilibria
-// ============================================================================
+/// Carries validation and convergence failures back to R as readable messages.
+type SolverResult<T> = std::result::Result<T, String>;
 
-/// Calculate alpha0 for carbonate system
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1co3` - First dissociation constant for carbonic acid
-/// * `k2co3` - Second dissociation constant for carbonic acid
-///
-/// # Returns
-/// * Alpha0 value (fraction of H2CO3 species)
-fn calculate_alpha0_carbonate(h: f64, k1co3: f64, k2co3: f64) -> f64 {
-    1.0 / (1.0 + (k1co3 / h) + (k1co3 * k2co3 / (h * h)))
+/// Bounds stack storage because the public schema supports at most three steps.
+const MAX_SPECIES: usize = 4;
+
+/// Lower endpoint of the existing hydrogen-concentration search interval.
+const LOG_H_MIN: f64 = -14.0 * std::f64::consts::LN_10;
+
+/// Upper endpoint of the existing hydrogen-concentration search interval.
+const LOG_H_MAX: f64 = 0.0;
+
+/// Gives the root finder approximately 1e-12 pH internal precision.
+const LOG_H_TOLERANCE: f64 = std::f64::consts::LN_10 * 1e-12;
+
+/// Caps safeguarded iterations well above the bisection worst case.
+const MAX_ROOT_ITERATIONS: usize = 100;
+
+/// Stores one dissociation step after its R definition has been validated.
+#[derive(Debug, Clone, Copy)]
+struct Ion {
+    ln_k: f64,
+    delta_h_over_r: f64,
 }
 
-/// Calculate alpha1 for carbonate system
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1co3` - First dissociation constant for carbonic acid
-/// * `k2co3` - Second dissociation constant for carbonic acid
-///
-/// # Returns
-/// * Alpha1 value (fraction of HCO3- species)
-fn calculate_alpha1_carbonate(h: f64, k1co3: f64, k2co3: f64) -> f64 {
-    (k1co3 * h) / (h * h + k1co3 * h + k1co3 * k2co3)
-}
-
-/// Calculate alpha2 for carbonate system
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1co3` - First dissociation constant for carbonic acid
-/// * `k2co3` - Second dissociation constant for carbonic acid
-///
-/// # Returns
-/// * Alpha2 value (fraction of CO3^2- species)
-fn calculate_alpha2_carbonate(h: f64, k1co3: f64, k2co3: f64) -> f64 {
-    (k1co3 * k2co3) / (h * h + k1co3 * h + k1co3 * k2co3)
-}
-
-/// Calculate alpha0 for phosphate system
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1po4` - First dissociation constant for phosphoric acid
-/// * `k2po4` - Second dissociation constant for phosphoric acid
-/// * `k3po4` - Third dissociation constant for phosphoric acid
-///
-/// # Returns
-/// * Alpha0 value (fraction of H3PO4 species)
-fn calculate_alpha0_phosphate(h: f64, k1po4: f64, k2po4: f64, k3po4: f64) -> f64 {
-    1.0 / (1.0 + (k1po4 / h) + (k1po4 * k2po4 / (h * h)) + (k1po4 * k2po4 * k3po4 / (h * h * h)))
-}
-
-/// Calculate alpha1 for phosphate system (H2PO4-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1po4` - First dissociation constant for phosphoric acid
-/// * `k2po4` - Second dissociation constant for phosphoric acid
-/// * `k3po4` - Third dissociation constant for phosphoric acid
-///
-/// # Returns
-/// * Alpha1 value (fraction of H2PO4- species)
-fn calculate_alpha1_phosphate(h: f64, k1po4: f64, k2po4: f64, k3po4: f64) -> f64 {
-    calculate_alpha0_phosphate(h, k1po4, k2po4, k3po4) * k1po4 / h
-}
-
-/// Calculate alpha2 for phosphate system (HPO4^2-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1po4` - First dissociation constant for phosphoric acid
-/// * `k2po4` - Second dissociation constant for phosphoric acid
-/// * `k3po4` - Third dissociation constant for phosphoric acid
-///
-/// # Returns
-/// * Alpha2 value (fraction of HPO4^2- species)
-fn calculate_alpha2_phosphate(h: f64, k1po4: f64, k2po4: f64, k3po4: f64) -> f64 {
-    calculate_alpha0_phosphate(h, k1po4, k2po4, k3po4) * (k1po4 * k2po4 / (h * h))
-}
-
-/// Calculate alpha3 for phosphate system (PO4^3-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1po4` - First dissociation constant for phosphoric acid
-/// * `k2po4` - Second dissociation constant for phosphoric acid
-/// * `k3po4` - Third dissociation constant for phosphoric acid
-///
-/// # Returns
-/// * Alpha3 value (fraction of PO4^3- species)
-fn calculate_alpha3_phosphate(h: f64, k1po4: f64, k2po4: f64, k3po4: f64) -> f64 {
-    calculate_alpha0_phosphate(h, k1po4, k2po4, k3po4) * (k1po4 * k2po4 * k3po4 / (h * h * h))
-}
-
-/// Calculate alpha1 for hypochlorite system (OCl-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `kocl` - Dissociation constant for hypochlorous acid
-///
-/// # Returns
-/// * Alpha1 value (fraction of OCl- species - deprotonated form with -1 charge)
-fn calculate_alpha1_hypochlorite(h: f64, kocl: f64) -> f64 {
-    1.0 / (1.0 + h / kocl)
-}
-
-/// Calculate alpha1 for ammonia system (NH4+)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `knh4` - Dissociation constant for ammonium
-///
-/// # Returns
-/// * Alpha1 value (fraction of NH4+ species - protonated form with +1 charge)
-fn calculate_alpha1_ammonia(h: f64, knh4: f64) -> f64 {
-    1.0 / (1.0 + knh4 / h)
-}
-
-/// Calculate alpha1 for borate system (H4BO4-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `kbo3` - Dissociation constant for boric acid
-///
-/// # Returns
-/// * Alpha1 value (fraction of H4BO4- species - deprotonated form with -1 charge)
-fn calculate_alpha1_borate(h: f64, kbo3: f64) -> f64 {
-    1.0 / (1.0 + h / kbo3)
-}
-
-/// Calculate alpha1 for silicate system (H3SiO4-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1sio4` - First dissociation constant for silicic acid
-/// * `k2sio4` - Second dissociation constant for silicic acid
-///
-/// # Returns
-/// * Alpha1 value (fraction of H3SiO4- species - deprotonated form with -1 charge)
-fn calculate_alpha1_silicate(h: f64, k1sio4: f64, k2sio4: f64) -> f64 {
-    1.0 / (1.0 + h / k1sio4 + k2sio4 / h)
-}
-
-/// Calculate alpha2 for silicate system (H2SiO4^2-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `k1sio4` - First dissociation constant for silicic acid
-/// * `k2sio4` - Second dissociation constant for silicic acid
-///
-/// # Returns
-/// * Alpha2 value (fraction of H2SiO4^2- species - deprotonated with -2 charge)
-fn calculate_alpha2_silicate(h: f64, k1sio4: f64, k2sio4: f64) -> f64 {
-    1.0 / (1.0 + h / k2sio4 + (h * h) / (k1sio4 * k2sio4))
-}
-
-/// Calculate alpha1 for acetate system (CH3COO-)
-///
-/// # Arguments
-/// * `h` - Hydrogen ion concentration [H+]
-/// * `kch3coo` - Dissociation constant for acetic acid
-///
-/// # Returns
-/// * Alpha1 value (fraction of CH3COO- species - deprotonated form with -1 charge)
-fn calculate_alpha1_acetate(h: f64, kch3coo: f64) -> f64 {
-    1.0 / (1.0 + h / kch3coo)
-}
-
-// ============================================================================
-// Activity coefficient and equilibrium constant functions
-// ============================================================================
-
-/// Structure to hold dissociation constant data
-#[derive(Debug, Clone)]
-struct DisconData {
-    k: f64,      // Equilibrium constant
-    deltah: f64, // Standard enthalpy in J/mol
-}
-
-/// Get dissociation constants data
-/// Based on data from Benjamin (2015) Appendix A.1 and A.2
-fn get_discons_data() -> std::collections::HashMap<&'static str, DisconData> {
-    let mut discons = std::collections::HashMap::new();
-
-    // Carbonic acid: H2CO3<-->HCO3- + H+; HCO3<-->CO32- + H+
-    discons.insert("k1co3", DisconData { k: 10_f64.powf(-6.35), deltah: 7700.0 });
-    discons.insert("k2co3", DisconData { k: 10_f64.powf(-10.33), deltah: 14900.0 });
-
-    // Sulfate: HSO4- <--> H+ + SO42-
-    discons.insert("kso4", DisconData { k: 10_f64.powf(-1.99), deltah: -21900.0 });
-
-    // Phosphate: H3PO4<-->H+ + H2PO4-; H2PO4-<-->H+ + HPO42-; HPO42--<-->H+ + PO43-
-    discons.insert("k1po4", DisconData { k: 10_f64.powf(-2.16), deltah: -8000.0 });
-    discons.insert("k2po4", DisconData { k: 10_f64.powf(-7.20), deltah: 4200.0 });
-    discons.insert("k3po4", DisconData { k: 10_f64.powf(-12.35), deltah: 14700.0 });
-
-    // Hypochlorite: HOCl<-->H+ + OCl-
-    discons.insert("kocl", DisconData { k: 10_f64.powf(-7.53), deltah: 13800.0 });
-
-    // Ammonia: NH4+ <--> NH3 + H+
-    discons.insert("knh4", DisconData { k: 10_f64.powf(-9.244), deltah: 52210.0 });
-
-    // Borate: H4BO4- <--> H3BO3 + OH-
-    discons.insert("kbo3", DisconData { k: 10_f64.powf(-9.24), deltah: -42000.0 });
-
-    // Silicate: H3SiO4- <--> H2SiO42- + H+; H2SiO42- <--> HSiO43- + H+
-    discons.insert("k1sio4", DisconData { k: 10_f64.powf(-9.84), deltah: 25600.0 });
-    discons.insert("k2sio4", DisconData { k: 10_f64.powf(-13.2), deltah: 37000.0 });
-
-    // Acetate: CH3COOH <--> H+ + CH3COO-
-    discons.insert("kch3coo", DisconData { k: 10_f64.powf(-4.757), deltah: -200.0 });
-
-    discons
-}
-
-/// Calculate activity coefficients using Davies equation
-///
-/// Based on equation 5-43 from Davies (1967), Crittenden et al. (2012)
-///
-/// # Arguments
-/// * `z` - Charge of ions in the solution
-/// * `ionic_strength` - Ionic strength of the solution (M)
-/// * `temp` - Temperature of the solution in Celsius
-///
-/// # Returns
-/// * Activity coefficient value
-fn calculate_activity(z: f64, ionic_strength: Option<f64>, temp: f64) -> f64 {
-    match ionic_strength {
-        Some(is) if !is.is_nan() => {
-            let temp_abs = temp + 273.15; // absolute temperature (K)
-
-            // Dielectric constant (relative permittivity) based on temperature
-            // from Harned and Owen (1958), Crittenden et al. (2012) equation 5-45
-            let de = 78.54 * (1.0 - (0.004579 * (temp_abs - 298.0))
-                + 11.9e-6 * (temp_abs - 298.0).powi(2)
-                + 28e-9 * (temp_abs - 298.0).powi(3));
-
-            // Constant for use in calculating activity coefficients
-            // from Stumm and Morgan (1996), Trussell (1998), Crittenden et al. (2012) equation 5-44
-            let a = 1.29e6 * (2_f64.sqrt() / (de * temp_abs).powf(1.5));
-
-            // Davies equation, Davies (1967), Crittenden et al. (2012) equation 5-43
-            let activity = 10_f64.powf(-a * z * z * ((is.sqrt() / (1.0 + is.sqrt())) - 0.3 * is));
-            activity
+impl Ion {
+    /// Caches log-space temperature terms once when catalog chemistry is parsed.
+    fn new(k: f64, delta_h: f64) -> Self {
+        Self {
+            ln_k: k.ln(),
+            delta_h_over_r: delta_h / 8.314,
         }
-        _ => 1.0, // Return 1.0 if ionic strength is None or NaN
     }
 }
 
-/// Temperature correction for equilibrium constants using van't Hoff equation
-///
-/// From Crittenden et al. (2012) equation 5-68 and Benjamin (2010) equation 2-17
-/// Assumes delta H for a reaction doesn't change with temperature, valid for ~0-30 deg C
-///
-/// # Arguments
-/// * `deltah` - Standard enthalpy of reaction (J/mol)
-/// * `ka` - Equilibrium constant at 25°C
-/// * `temp` - Temperature in Celsius
-///
-/// # Returns
-/// * Temperature-corrected equilibrium constant
-fn k_temp_adjust(deltah: f64, ka: f64, temp: f64) -> f64 {
-    let r = 8.314; // J/mol * K
-    let temp_abs = temp + 273.15;
-    let ln_k = ka.ln();
-    ((deltah / r * (1.0 / 298.15 - 1.0 / temp_abs)) + ln_k).exp()
+/// Distinguishes systems whose charged species lie on either side of neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChargeDirection {
+    Negative,
+    Positive,
 }
 
-/// Structure to hold corrected equilibrium constants
+impl ChargeDirection {
+    /// Converts the direction into the sign used when summing charge balance.
+    fn sign(self) -> i8 {
+        match self {
+            Self::Negative => -1,
+            Self::Positive => 1,
+        }
+    }
+}
+
+/// Caches the immutable chemistry supplied when a solver is constructed.
 #[derive(Debug, Clone)]
-struct CorrectedConstants {
-    k1co3: f64,
-    k2co3: f64,
-    k1po4: f64,
-    k2po4: f64,
-    k3po4: f64,
-    kocl: f64,
-    knh4: f64,
-    kso4: f64,
-    kbo3: f64,
-    k1sio4: f64,
-    k2sio4: f64,
-    kch3coo: f64,
+struct DependentDefinition {
+    ions: Vec<Ion>,
+    charge_direction: ChargeDirection,
 }
 
-/// Correct dissociation constants for temperature and ionic strength
-///
-/// Dissociation constants corrected for non-ideal solutions following Benjamin (2010) example 3.14.
-///
-/// # Arguments
-/// * `temp` - Temperature in Celsius
-/// * `ionic_strength` - Ionic strength of the solution (M), None if not available
-///
-/// # Returns
-/// * CorrectedConstants structure with temperature and activity-corrected equilibrium constants
-fn correct_k(temp: f64, ionic_strength: Option<f64>) -> CorrectedConstants {
-    // Determine activity coefficients
-    let (activity_z1, activity_z2, activity_z3) = match ionic_strength {
-        Some(is) if !is.is_nan() => (
-            calculate_activity(1.0, Some(is), temp),
-            calculate_activity(2.0, Some(is), temp),
-            calculate_activity(3.0, Some(is), temp),
-        ),
-        _ => (1.0, 1.0, 1.0),
+/// Stores one validated fixed-charge catalog entry in indexed solver order.
+#[derive(Debug, Clone, Copy)]
+struct IndependentDefinition {
+    charge: i8,
+}
+
+/// Reuses invocation-sized buffers so successful solves do not allocate.
+#[derive(Debug)]
+struct SolveScratch {
+    prepared: Vec<PreparedCompound>,
+    definition_cache: Vec<Option<CachedDefinition>>,
+    activity_cache: Option<CachedActivity>,
+    seen_dependent: Vec<bool>,
+    seen_independent: Vec<bool>,
+    dependent_order: Vec<usize>,
+    independent_order: Vec<usize>,
+}
+
+impl SolveScratch {
+    /// Allocates buffers once at solver construction using catalog capacities.
+    fn new(dependent_len: usize, independent_len: usize) -> Self {
+        Self {
+            prepared: Vec::with_capacity(dependent_len),
+            definition_cache: vec![None; dependent_len],
+            activity_cache: None,
+            seen_dependent: vec![false; dependent_len],
+            seen_independent: vec![false; independent_len],
+            dependent_order: Vec::with_capacity(dependent_len),
+            independent_order: Vec::with_capacity(independent_len),
+        }
+    }
+
+    /// Clears per-call state while retaining every backing allocation.
+    fn reset(&mut self) {
+        self.prepared.clear();
+        self.seen_dependent.fill(false);
+        self.seen_independent.fill(false);
+    }
+}
+
+/// Owns indexed catalogs and reusable scratch behind the external pointer.
+#[derive(Debug)]
+struct SolverConfig {
+    dependent_names: Vec<Box<str>>,
+    dependent_definitions: Vec<DependentDefinition>,
+    dependent_index: HashMap<Box<str>, usize>,
+    independent_names: Vec<Box<str>>,
+    independent_definitions: Vec<IndependentDefinition>,
+    independent_index: HashMap<Box<str>, usize>,
+    scratch: RefCell<SolveScratch>,
+}
+
+/// Stores cumulative corrected log constants for repeated root evaluations.
+#[derive(Debug, Clone, Copy)]
+struct PreparedCompound {
+    cumulative_log_k: [f64; MAX_SPECIES],
+    len: usize,
+    charge_direction: ChargeDirection,
+    total: f64,
+}
+
+/// Identifies exact temperature and ionic-strength inputs for chemistry caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChemistryKey {
+    temp_bits: u64,
+    ionic_strength_bits: Option<u64>,
+}
+
+impl ChemistryKey {
+    /// Preserves exact floating-point inputs without approximate cache matching.
+    fn new(temp: f64, ionic_strength: Option<f64>) -> Self {
+        Self {
+            temp_bits: temp.to_bits(),
+            ionic_strength_bits: ionic_strength.map(f64::to_bits),
+        }
+    }
+}
+
+/// Caches activity terms shared by every compound at one solution condition.
+#[derive(Debug, Clone, Copy)]
+struct CachedActivity {
+    key: ChemistryKey,
+    gamma_h: f64,
+    log_gamma_h: f64,
+    log_gammas: [f64; MAX_SPECIES],
+}
+
+/// Caches one definition's corrected constants for its most recent condition.
+#[derive(Debug, Clone, Copy)]
+struct CachedDefinition {
+    key: ChemistryKey,
+    prepared: PreparedCompound,
+}
+
+/// Carries a compound's charge and derivative contribution from one softmax.
+#[derive(Debug, Clone, Copy)]
+struct ChargeMoments {
+    charge: f64,
+    derivative: f64,
+}
+
+/// Carries charge balance and its derivative with respect to log hydrogen.
+#[derive(Debug, Clone, Copy)]
+struct BalancePoint {
+    balance: f64,
+    derivative: f64,
+}
+
+/// Holds values shared by every numerical evaluation in one solve.
+struct ChargeBalance<'a> {
+    compounds: &'a [PreparedCompound],
+    kw: f64,
+    gamma_h: f64,
+    dose_charge: f64,
+    starting_charge: f64,
+}
+
+impl ChargeBalance<'_> {
+    /// Evaluates charge balance and its positive analytic derivative together.
+    fn evaluate(&self, log_h: f64) -> BalancePoint {
+        let h = log_h.exp();
+        let oh = self.kw / (h * self.gamma_h * self.gamma_h);
+        let mut dependent_charge = 0.0;
+        let mut dependent_derivative = 0.0;
+        for compound in self.compounds {
+            let moments = charge_moments(compound, log_h);
+            dependent_charge += moments.charge;
+            dependent_derivative += moments.derivative;
+        }
+        BalancePoint {
+            balance: h - oh + dependent_charge + self.dose_charge - self.starting_charge,
+            derivative: h + oh + dependent_derivative,
+        }
+    }
+}
+
+/// Contains a root and test-only evaluation instrumentation.
+struct RootSolution {
+    log_h: f64,
+    #[cfg(test)]
+    evaluations: usize,
+}
+
+/// Computes a Davies activity coefficient so non-ideal solutions can be solved.
+fn calculate_activity(charge: i8, ionic_strength: Option<f64>, temp: f64) -> f64 {
+    match ionic_strength {
+        Some(value) => {
+            let temp_abs = temp + 273.15;
+            let de = 78.54
+                * (1.0 - 0.004579 * (temp_abs - 298.0)
+                    + 11.9e-6 * (temp_abs - 298.0).powi(2)
+                    + 28e-9 * (temp_abs - 298.0).powi(3));
+            let a = 1.29e6 * (2_f64.sqrt() / (de * temp_abs).powf(1.5));
+            let sqrt_i = value.sqrt();
+            10_f64.powf(-a * f64::from(charge).powi(2) * (sqrt_i / (1.0 + sqrt_i) - 0.3 * value))
+        }
+        None => 1.0,
+    }
+}
+
+/// Precomputes every supported activity coefficient once per solve.
+fn activity_coefficients(ionic_strength: Option<f64>, temp: f64) -> [f64; MAX_SPECIES] {
+    let gamma_one = calculate_activity(1, ionic_strength, temp);
+    [1.0, gamma_one, gamma_one.powi(4), gamma_one.powi(9)]
+}
+
+/// Identifies each dissociation transition so its activity correction uses the
+/// correct reactant and product charges in Benjamin's distance-from-neutral order.
+fn ion_charges(direction: ChargeDirection, ion_index: usize) -> (i8, i8) {
+    let charge_magnitude = (ion_index + 1) as i8;
+    match direction {
+        ChargeDirection::Negative => (-(charge_magnitude - 1), -charge_magnitude),
+        ChargeDirection::Positive => (charge_magnitude, charge_magnitude - 1),
+    }
+}
+
+/// Prepares cached chemistry directly from one validated runtime total.
+fn prepare_definition(
+    definition: &DependentDefinition,
+    temp: f64,
+    log_gammas: &[f64; MAX_SPECIES],
+) -> PreparedCompound {
+    let inverse_temperature_delta = 1.0 / 298.15 - 1.0 / (temp + 273.15);
+    let mut cumulative_log_k = [0.0; MAX_SPECIES];
+    for (ion_index, ion) in definition.ions.iter().enumerate() {
+        let (reactant_charge, product_charge) = ion_charges(definition.charge_direction, ion_index);
+        let corrected_log_k = ion.ln_k
+            + ion.delta_h_over_r * inverse_temperature_delta
+            + log_gammas[usize::from(reactant_charge.unsigned_abs())]
+            - log_gammas[1]
+            - log_gammas[usize::from(product_charge.unsigned_abs())];
+        cumulative_log_k[ion_index + 1] = cumulative_log_k[ion_index] + corrected_log_k;
+    }
+    PreparedCompound {
+        cumulative_log_k,
+        len: definition.ions.len() + 1,
+        charge_direction: definition.charge_direction,
+        total: 0.0,
+    }
+}
+
+/// Fuses stable alpha normalization with charge mean and variance calculation.
+fn charge_moments(compound: &PreparedCompound, log_h: f64) -> ChargeMoments {
+    let mut log_weights = [0.0; MAX_SPECIES];
+    for (index, weight) in log_weights[..compound.len].iter_mut().enumerate().skip(1) {
+        let index = index as f64;
+        *weight = match compound.charge_direction {
+            ChargeDirection::Negative => compound.cumulative_log_k[index as usize] - index * log_h,
+            ChargeDirection::Positive => index * log_h - compound.cumulative_log_k[index as usize],
+        };
+    }
+    let maximum = log_weights[..compound.len]
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut total_weight = 0.0;
+    let mut first_moment = 0.0;
+    let mut second_moment = 0.0;
+    for (index, log_weight) in log_weights[..compound.len].iter().enumerate() {
+        let weight = (*log_weight - maximum).exp();
+        let index = index as f64;
+        total_weight += weight;
+        first_moment += index * weight;
+        second_moment += index * index * weight;
+    }
+    let mean = first_moment / total_weight;
+    let variance = (second_moment / total_weight - mean * mean).max(0.0);
+    ChargeMoments {
+        charge: f64::from(compound.charge_direction.sign()) * compound.total * mean,
+        derivative: compound.total * variance,
+    }
+}
+
+/// Finds the unique root with Newton steps guarded by a persistent bracket.
+fn find_root_safeguarded(balance: &ChargeBalance<'_>) -> SolverResult<RootSolution> {
+    #[cfg(test)]
+    let mut evaluations = 0;
+    #[allow(unused_mut)]
+    let mut evaluate = |log_h| {
+        #[cfg(test)]
+        {
+            evaluations += 1;
+        }
+        balance.evaluate(log_h)
     };
 
-    let discons = get_discons_data();
+    let mut lower = LOG_H_MIN;
+    let mut upper = LOG_H_MAX;
+    let lower_point = evaluate(lower);
+    let upper_point = evaluate(upper);
+    if !lower_point.balance.is_finite()
+        || !upper_point.balance.is_finite()
+        || lower_point.balance > 0.0
+        || upper_point.balance < 0.0
+    {
+        return Err("The pH solver failed to converge to a solution on [0, 14].".to_string());
+    }
+    if lower_point.balance == 0.0 {
+        return Ok(RootSolution {
+            log_h: lower,
+            #[cfg(test)]
+            evaluations,
+        });
+    }
+    if upper_point.balance == 0.0 {
+        return Ok(RootSolution {
+            log_h: upper,
+            #[cfg(test)]
+            evaluations,
+        });
+    }
 
-    // Calculate temperature and activity corrected equilibrium constants
-    // k1co3 = {h+}{hco3-}/{h2co3}
-    let k1co3 = k_temp_adjust(discons["k1co3"].deltah, discons["k1co3"].k, temp) / (activity_z1 * activity_z1);
+    let mut current = -7.0 * std::f64::consts::LN_10;
+    for _ in 0..MAX_ROOT_ITERATIONS {
+        let point = evaluate(current);
+        if !point.balance.is_finite() || !point.derivative.is_finite() || point.derivative <= 0.0 {
+            return Err("The pH solver failed to converge to a solution on [0, 14].".to_string());
+        }
+        if point.balance < 0.0 {
+            lower = current;
+        } else if point.balance > 0.0 {
+            upper = current;
+        } else {
+            return Ok(RootSolution {
+                log_h: current,
+                #[cfg(test)]
+                evaluations,
+            });
+        }
 
-    // k2co3 = {h+}{co32-}/{hco3-}
-    let k2co3 = k_temp_adjust(discons["k2co3"].deltah, discons["k2co3"].k, temp) / activity_z2;
+        let bracket_width = upper - lower;
+        if bracket_width <= LOG_H_TOLERANCE {
+            return Ok(RootSolution {
+                log_h: (lower + upper) / 2.0,
+                #[cfg(test)]
+                evaluations,
+            });
+        }
 
-    // kso4 = {h+}{so42-}/{hso4-} Only one relevant dissociation for sulfuric acid in natural waters.
-    let kso4 = k_temp_adjust(discons["kso4"].deltah, discons["kso4"].k, temp) / activity_z2;
+        let newton = current - point.balance / point.derivative;
+        let next = if newton.is_finite()
+            && newton > lower
+            && newton < upper
+            && (newton - current).abs() <= bracket_width / 2.0
+        {
+            newton
+        } else {
+            (lower + upper) / 2.0
+        };
+        if next == current {
+            return Ok(RootSolution {
+                log_h: current,
+                #[cfg(test)]
+                evaluations,
+            });
+        }
+        current = next;
+    }
+    Err("The pH solver failed to converge to a solution on [0, 14].".to_string())
+}
 
-    // k1po4 = {h+}{h2po4-}/{h3po4}
-    let k1po4 = k_temp_adjust(discons["k1po4"].deltah, discons["k1po4"].k, temp) / (activity_z1 * activity_z1);
+/// Runs Newton from an already prepared charge balance without allocating.
+fn solve_prepared(
+    kw: f64,
+    compounds: &[PreparedCompound],
+    gamma_h: f64,
+    log_gamma_h: f64,
+    dose_charge: f64,
+    starting_charge: f64,
+) -> SolverResult<f64> {
+    let balance = ChargeBalance {
+        compounds,
+        kw,
+        gamma_h,
+        dose_charge,
+        starting_charge,
+    };
+    let root = find_root_safeguarded(&balance)?;
+    Ok(-(root.log_h + log_gamma_h) / std::f64::consts::LN_10)
+}
 
-    // k2po4 = {h+}{hpo42-}/{h2po4-}
-    let k2po4 = k_temp_adjust(discons["k2po4"].deltah, discons["k2po4"].k, temp) / activity_z2;
+/// Requires an R value to be a list while preserving its location in errors.
+fn as_list(value: &Robj, path: &str) -> SolverResult<List> {
+    value
+        .as_list()
+        .ok_or_else(|| format!("`{path}` must be a list."))
+}
 
-    // k3po4 = {h+}{po43-}/{hpo42-}
-    let k3po4 = k_temp_adjust(discons["k3po4"].deltah, discons["k3po4"].k, temp) * activity_z2 / (activity_z1 * activity_z3);
+/// Extracts named list entries and rejects names that make lookup ambiguous.
+fn named_entries(list: &List, path: &str) -> SolverResult<Vec<(String, Robj)>> {
+    if !list.is_empty() && list.names().is_none() {
+        return Err(format!(
+            "Every entry in `{path}` must have a non-empty name."
+        ));
+    }
+    let entries: Vec<(String, Robj)> = list
+        .iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    if entries.iter().any(|(name, _)| name.is_empty()) {
+        return Err(format!(
+            "Every entry in `{path}` must have a non-empty name."
+        ));
+    }
+    let mut seen = HashSet::new();
+    if entries.iter().any(|(name, _)| !seen.insert(name.clone())) {
+        return Err(format!("Names in `{path}` must be unique."));
+    }
+    Ok(entries)
+}
 
-    // kocl = {h+}{ocl-}/{hocl}
-    let kocl = k_temp_adjust(discons["kocl"].deltah, discons["kocl"].k, temp) / (activity_z1 * activity_z1);
+/// Enforces exact nested-list schemas so misspelled fields cannot be ignored.
+fn exact_fields(value: &Robj, path: &str, expected: &[&str]) -> SolverResult<List> {
+    let list = as_list(value, path)?;
+    let entries = named_entries(&list, path)?;
+    let actual: HashSet<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+    let wanted: HashSet<&str> = expected.iter().copied().collect();
+    if actual != wanted || entries.len() != expected.len() {
+        return Err(format!(
+            "`{path}` must contain exactly {}.",
+            expected
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+    }
+    Ok(list)
+}
 
-    // knh4 = {h+}{nh3}/{nh4+}
-    let knh4 = k_temp_adjust(discons["knh4"].deltah, discons["knh4"].k, temp) / (activity_z1 * activity_z1);
+/// Retrieves a field already proven to exist by [`exact_fields`].
+fn field(list: &List, name: &str) -> Robj {
+    list.iter()
+        .find_map(|(field_name, value)| (field_name == name).then_some(value))
+        .expect("exact_fields guarantees required fields")
+}
 
-    // kbo3 = {oh-}{h3bo3}/{h4bo4-}
-    let kbo3 = k_temp_adjust(discons["kbo3"].deltah, discons["kbo3"].k, temp) / (activity_z1 * activity_z1);
+/// Accepts R integer or double scalars and rejects missing or infinite values.
+fn finite_scalar(value: &Robj) -> Option<f64> {
+    value
+        .as_real()
+        .or_else(|| value.as_integer().map(f64::from))
+        .filter(|number| number.is_finite())
+}
 
-    // k1sio4 = {h+}{h2sio42-}/{h3sio4-}
-    let k1sio4 = k_temp_adjust(discons["k1sio4"].deltah, discons["k1sio4"].k, temp) / (activity_z1 * activity_z1);
+/// Accepts R integer or double scalars and adds a path only on failure.
+fn scalar_number(value: &Robj, path: &str) -> SolverResult<f64> {
+    finite_scalar(value).ok_or_else(|| format!("`{path}` must be one finite number."))
+}
 
-    // k2sio4 = {h+}{hsio43-}/{h2sio42-}
-    let k2sio4 = k_temp_adjust(discons["k2sio4"].deltah, discons["k2sio4"].k, temp) / activity_z2;
+/// Validates concentrations and ionic strengths that may be zero.
+fn nonnegative_number(value: &Robj, path: &str) -> SolverResult<f64> {
+    let number = scalar_number(value, path)?;
+    if number < 0.0 {
+        return Err(format!("`{path}` must be one finite number >= 0."));
+    }
+    Ok(number)
+}
 
-    // kch3coo = {h+}{ch3coo-}/{ch3cooh}
-    let kch3coo = k_temp_adjust(discons["kch3coo"].deltah, discons["kch3coo"].k, temp) / (activity_z1 * activity_z1);
+/// Validates constants such as K values that must be strictly positive.
+fn positive_number(value: &Robj, path: &str) -> SolverResult<f64> {
+    let number = scalar_number(value, path)?;
+    if number <= 0.0 {
+        return Err(format!("`{path}` must be one finite number > 0."));
+    }
+    Ok(number)
+}
 
-    CorrectedConstants {
-        k1co3,
-        k2co3,
-        k1po4,
-        k2po4,
-        k3po4,
-        kocl,
-        knh4,
-        kso4,
-        kbo3,
-        k1sio4,
-        k2sio4,
-        kch3coo,
+/// Represents R `NULL` as an omitted nonnegative numerical correction.
+fn optional_nonnegative_number(value: &Robj, path: &str) -> SolverResult<Option<f64>> {
+    if value.is_null() {
+        Ok(None)
+    } else {
+        nonnegative_number(value, path).map(Some)
     }
 }
 
-// ============================================================================
-// pH solving functions
-// ============================================================================
+/// Turns the public -1/1 direction convention into a type-safe Rust enum.
+fn parse_charge_direction(value: &Robj, path: &str) -> SolverResult<ChargeDirection> {
+    match scalar_number(value, path)? {
+        -1.0 => Ok(ChargeDirection::Negative),
+        1.0 => Ok(ChargeDirection::Positive),
+        _ => Err(format!("`{path}` must be either -1 or 1.")),
+    }
+}
 
-/// Structure to hold water parameters needed for pH solving
-#[derive(Debug, Clone)]
-struct WaterParams {
-    // Basic parameters
+/// Validates a fixed ion's signed integral valence before narrowing it to `i8`.
+fn parse_independent_charge(value: &Robj, path: &str) -> SolverResult<i8> {
+    let charge = scalar_number(value, path)?;
+    if charge == 0.0 || charge.fract() != 0.0 || charge < i8::MIN as f64 || charge > i8::MAX as f64
+    {
+        return Err(format!(
+            "`{path}` must be a nonzero integer between -128 and 127."
+        ));
+    }
+    Ok(charge as i8)
+}
+
+/// Parses pH-dependent catalog entries once for storage in [`SolverConfig`].
+fn parse_dependent_definitions(list: &List) -> SolverResult<HashMap<String, DependentDefinition>> {
+    named_entries(list, "ph_dependent")?
+        .into_iter()
+        .map(|(name, value)| {
+            let path = format!("ph_dependent${name}");
+            let definition = exact_fields(&value, &path, &["constants", "charge"])?;
+            let constants_path = format!("{path}$constants");
+            let constants = as_list(&field(&definition, "constants"), &constants_path)?;
+            if constants.is_empty() {
+                return Err(format!("`{constants_path}` must be a non-empty list."));
+            }
+            if constants.len() >= MAX_SPECIES {
+                return Err(format!(
+                    "`{constants_path}` must contain one to three dissociation constants (two to four ion states)."
+                ));
+            }
+            let ions = constants
+                .values()
+                .enumerate()
+                .map(|(index, value)| {
+                    let ion_path = format!("{constants_path}[[{}]]", index + 1);
+                    let ion = exact_fields(&value, &ion_path, &["k", "delta_h"])?;
+                    Ok(Ion::new(
+                        positive_number(&field(&ion, "k"), &format!("{ion_path}$k"))?,
+                        scalar_number(
+                            &field(&ion, "delta_h"),
+                            &format!("{ion_path}$delta_h"),
+                        )?,
+                    ))
+                })
+                .collect::<SolverResult<Vec<_>>>()?;
+            let charge_direction = parse_charge_direction(
+                &field(&definition, "charge"),
+                &format!("{path}$charge"),
+            )?;
+            Ok((
+                name,
+                DependentDefinition {
+                    ions,
+                    charge_direction,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Parses the flat fixed-charge catalog once for storage in [`SolverConfig`].
+fn parse_independent_definitions(list: &List) -> SolverResult<HashMap<String, i8>> {
+    named_entries(list, "ph_independent_charges")?
+        .into_iter()
+        .map(|(name, value)| {
+            let path = format!("ph_independent_charges${name}");
+            let charge = parse_independent_charge(&value, &path)?;
+            Ok((name, charge))
+        })
+        .collect()
+}
+
+/// Builds both catalogs together and prevents a name from having two meanings.
+fn validate_catalog(
+    ph_dependent: &List,
+    ph_independent_charges: &List,
+) -> SolverResult<(HashMap<String, DependentDefinition>, HashMap<String, i8>)> {
+    let dependent = parse_dependent_definitions(ph_dependent)?;
+    let independent = parse_independent_definitions(ph_independent_charges)?;
+    let mut overlap: Vec<&String> = dependent
+        .keys()
+        .filter(|name| independent.contains_key(*name))
+        .collect();
+    overlap.sort();
+    if !overlap.is_empty() {
+        return Err(format!(
+            "Compounds cannot be both pH-dependent and pH-independent: {}.",
+            overlap
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok((dependent, independent))
+}
+
+impl SolverConfig {
+    /// Converts validated named catalogs into stable indexed execution tables.
+    fn from_catalogs(
+        dependent: HashMap<String, DependentDefinition>,
+        independent: HashMap<String, i8>,
+    ) -> Self {
+        let dependent_len = dependent.len();
+        let independent_len = independent.len();
+        let mut dependent_names = Vec::with_capacity(dependent_len);
+        let mut dependent_definitions = Vec::with_capacity(dependent_len);
+        let mut dependent_index = HashMap::with_capacity(dependent_len);
+        for (index, (name, definition)) in dependent.into_iter().enumerate() {
+            let name = name.into_boxed_str();
+            dependent_index.insert(name.clone(), index);
+            dependent_names.push(name);
+            dependent_definitions.push(definition);
+        }
+
+        let mut independent_names = Vec::with_capacity(independent_len);
+        let mut independent_definitions = Vec::with_capacity(independent_len);
+        let mut independent_index = HashMap::with_capacity(independent_len);
+        for (index, (name, charge)) in independent.into_iter().enumerate() {
+            let name = name.into_boxed_str();
+            independent_index.insert(name.clone(), index);
+            independent_names.push(name);
+            independent_definitions.push(IndependentDefinition { charge });
+        }
+
+        Self {
+            dependent_names,
+            dependent_definitions,
+            dependent_index,
+            independent_names,
+            independent_definitions,
+            independent_index,
+            scratch: RefCell::new(SolveScratch::new(dependent_len, independent_len)),
+        }
+    }
+}
+
+/// Resolves a runtime name through a cached positional fast path or borrowed lookup.
+fn resolve_runtime_index(
+    name: &str,
+    position: usize,
+    names: &[Box<str>],
+    index: &HashMap<Box<str>, usize>,
+    cached_order: &mut Vec<usize>,
+) -> Option<usize> {
+    if let Some(&cached) = cached_order.get(position) {
+        if names[cached].as_ref() == name {
+            return Some(cached);
+        }
+    }
+    let resolved = *index.get(name)?;
+    if position < cached_order.len() {
+        cached_order[position] = resolved;
+    } else {
+        cached_order.push(resolved);
+    }
+    Some(resolved)
+}
+
+/// Produces the fixed runtime-schema error only when a malformed entry is found.
+fn dependent_schema_error(name: &str) -> String {
+    format!("`ph_dependent${name}` must contain exactly `total` and `initial`.")
+}
+
+/// Validates one runtime dependent entry without allocating successful values.
+fn parse_dependent_values(
+    name: &str,
+    value: &Robj,
+    definition: &DependentDefinition,
+) -> SolverResult<(f64, f64)> {
+    let runtime = value
+        .as_list()
+        .ok_or_else(|| format!("`ph_dependent${name}` must be a list."))?;
+    if runtime.len() != 2 || runtime.names().is_none() {
+        return Err(dependent_schema_error(name));
+    }
+
+    let mut total_value = None;
+    let mut initial_value = None;
+    for (field_name, field_value) in runtime.iter() {
+        match field_name {
+            "total" if total_value.is_none() => total_value = Some(field_value),
+            "initial" if initial_value.is_none() => initial_value = Some(field_value),
+            _ => return Err(dependent_schema_error(name)),
+        }
+    }
+    let total_value = total_value.ok_or_else(|| dependent_schema_error(name))?;
+    let initial_value = initial_value.ok_or_else(|| dependent_schema_error(name))?;
+    let total = finite_scalar(&total_value)
+        .filter(|number| *number >= 0.0)
+        .ok_or_else(|| format!("`ph_dependent${name}$total` must be one finite number >= 0."))?;
+    let initial_values = initial_value
+        .as_list()
+        .ok_or_else(|| format!("`ph_dependent${name}$initial` must be a list."))?;
+    if initial_values.len() != definition.ions.len() {
+        return Err(format!(
+            "`ph_dependent${name}$initial` must be a list of length {}.",
+            definition.ions.len()
+        ));
+    }
+
+    let sign = f64::from(definition.charge_direction.sign());
+    let mut initial_charge = 0.0;
+    for (ion_index, initial_value) in initial_values.values().enumerate() {
+        let concentration = finite_scalar(&initial_value)
+            .filter(|number| *number >= 0.0)
+            .ok_or_else(|| {
+                format!(
+                    "`ph_dependent${name}$initial[[{}]]` must be one finite number >= 0.",
+                    ion_index + 1
+                )
+            })?;
+        initial_charge += concentration * sign * (ion_index + 1) as f64;
+    }
+
+    Ok((total, initial_charge))
+}
+
+/// Reuses activity terms while temperature and ionic strength remain unchanged.
+fn activity_for_condition(
+    scratch: &mut SolveScratch,
+    key: ChemistryKey,
     temp: f64,
     ionic_strength: Option<f64>,
-    kw: f64,
-
-    // Total concentrations
-    tot_po4: f64,
-    tot_co3: f64,
-    tot_ocl: f64,  // free_chlorine
-    tot_nh3: f64,
-    tot_ch3coo: f64,
-
-    // Initial ion concentrations
-    h2po4_i: f64,
-    hpo4_i: f64,
-    po4_i: f64,
-    ocl_i: f64,
-    nh4_i: f64,
-    ch3coo_i: f64,
-    carbonate_alk_eq: f64,
-    oh_i: f64,
-    h_i: f64,
-}
-
-/// Structure to hold dose parameters
-#[derive(Debug, Clone, Default)]
-struct DoseParams {
-    so4_dose: f64,
-    na_dose: f64,
-    ca_dose: f64,
-    mg_dose: f64,
-    cl_dose: f64,
-    mno4_dose: f64,
-    no3_dose: f64,
-}
-
-/// Charge balance equation for pH solving
-///
-/// This function implements the charge balance equation used in solve_ph
-/// Returns the charge imbalance that should equal zero at equilibrium
-fn charge_balance_equation(
-    h: f64,
-    water: &WaterParams,
-    doses: &DoseParams,
-    ks: &CorrectedConstants,
-    gamma1: f64,
-) -> f64 {
-    // Calculate alpha values for each system
-    let alpha1_po4 = calculate_alpha1_phosphate(h, ks.k1po4, ks.k2po4, ks.k3po4);
-    let alpha2_po4 = calculate_alpha2_phosphate(h, ks.k1po4, ks.k2po4, ks.k3po4);
-    let alpha3_po4 = calculate_alpha3_phosphate(h, ks.k1po4, ks.k2po4, ks.k3po4);
-
-    let alpha1_co3 = calculate_alpha1_carbonate(h, ks.k1co3, ks.k2co3);
-    let alpha2_co3 = calculate_alpha2_carbonate(h, ks.k1co3, ks.k2co3);
-
-    let alpha1_ocl = calculate_alpha1_hypochlorite(h, ks.kocl);
-    let alpha1_nh3 = calculate_alpha1_ammonia(h, ks.knh4);
-    let alpha1_ch3coo = calculate_alpha1_acetate(h, ks.kch3coo);
-
-    // Charge balance equation (same as R implementation)
-    water.kw / (h * gamma1 * gamma1) +
-        2.0 * doses.so4_dose +
-        water.tot_po4 * (alpha1_po4 + 2.0 * alpha2_po4 + 3.0 * alpha3_po4) +
-        water.tot_co3 * (alpha1_co3 + 2.0 * alpha2_co3) +
-        water.tot_ocl * alpha1_ocl +
-        water.tot_ch3coo * alpha1_ch3coo +
-        doses.cl_dose +
-        doses.mno4_dose +
-        doses.no3_dose -
-        (h + doses.na_dose + 2.0 * doses.ca_dose + 2.0 * doses.mg_dose +
-         water.tot_nh3 * alpha1_nh3) -
-        (water.carbonate_alk_eq + water.oh_i) -
-        3.0 * water.po4_i - 2.0 * water.hpo4_i - water.h2po4_i - water.ocl_i +
-        water.nh4_i + water.h_i
-}
-
-/// Solve for pH using root finding (internal implementation)
-///
-/// This function solves the charge balance equation to find the hydrogen ion concentration,
-/// then converts it to pH
-///
-/// # Arguments
-/// * `water` - Water parameters structure
-/// * `doses` - Chemical dose parameters (defaults to 0 if not specified)
-///
-/// # Returns
-/// * pH value rounded to 2 decimal places
-fn solve_ph_internal(water: &WaterParams, doses: &DoseParams) -> std::result::Result<f64, String> {
-    // Get corrected equilibrium constants
-    let ks = correct_k(water.temp, water.ionic_strength);
-
-    // Calculate activity coefficient for H+
-    let gamma1 = calculate_activity(1.0, water.ionic_strength, water.temp);
-
-    // Define the function to find the root of
-    let f = |h: f64| -> f64 {
-        charge_balance_equation(h, water, doses, &ks, gamma1)
-    };
-
-    // NOTE: This is likely not the ideal method
-    // Other solvers were tried and found to be faster, and have better convergence.
-    // However, this method was found to give extremely close results to the prior R implementation.
-    // In testing across a random sampling of semi-realistic waters we found with this approach had
-    // extremely good agreement with the R implementation:
-    //  - 94% of results are within 0.001 pH units (essentially identical)
-    //  - 100% of results are within 0.01 pH units (excellent agreement)
-
-
-    // Use Brent's method to find the root (same as R's uniroot)
-    // Set up convergency criteria similar to R's uniroot defaults
-    let mut convergency = SimpleConvergency {
-        eps: 1e-14,      // Similar to R's tol parameter
-        max_iter: 1000   // Similar to R's maxiter parameter
-    };
-    let result = find_root_brent(1e-14, 1.0, f, &mut convergency);
-
-    match result {
-        Ok(h_root) => {
-            // Convert H+ concentration to pH
-            let ph_final = -(h_root * gamma1).log10();
-            Ok((ph_final * 100.0).round() / 100.0) // Round to 2 decimal places
+) -> CachedActivity {
+    if let Some(cached) = scratch.activity_cache {
+        if cached.key == key {
+            return cached;
         }
-        Err(_) => Err("Failed to converge to a solution".to_string()),
+    }
+    let gammas = activity_coefficients(ionic_strength, temp);
+    let log_gamma_h = gammas[1].ln();
+    let cached = CachedActivity {
+        key,
+        gamma_h: gammas[1],
+        log_gamma_h,
+        log_gammas: [0.0, log_gamma_h, 4.0 * log_gamma_h, 9.0 * log_gamma_h],
+    };
+    scratch.activity_cache = Some(cached);
+    cached
+}
+
+/// Parses changing compounds directly into reusable prepared solver storage.
+#[allow(clippy::too_many_arguments)]
+fn prepare_runtime_inputs(
+    solver: &SolverConfig,
+    scratch: &mut SolveScratch,
+    temp: f64,
+    ionic_strength: Option<f64>,
+    dependent_values: &List,
+    independent_values: &List,
+    h_i: f64,
+    oh_i: f64,
+) -> SolverResult<(f64, f64, f64, f64)> {
+    if dependent_values.is_empty() {
+        return Err("`ph_dependent` must contain at least one compound.".to_string());
+    }
+    if dependent_values.names().is_none() {
+        return Err("Every entry in `ph_dependent` must have a non-empty name.".to_string());
+    }
+
+    scratch.reset();
+    let chemistry_key = ChemistryKey::new(temp, ionic_strength);
+    let activity = activity_for_condition(scratch, chemistry_key, temp, ionic_strength);
+    let mut starting_charge = h_i - oh_i;
+    for (position, (name, value)) in dependent_values.iter().enumerate() {
+        if name.is_empty() {
+            return Err("Every entry in `ph_dependent` must have a non-empty name.".to_string());
+        }
+        let definition_index = resolve_runtime_index(
+            name,
+            position,
+            &solver.dependent_names,
+            &solver.dependent_index,
+            &mut scratch.dependent_order,
+        )
+        .ok_or_else(|| format!("Unknown compound in `ph_dependent`: {name}."))?;
+        if scratch.seen_dependent[definition_index] {
+            return Err("Names in `ph_dependent` must be unique.".to_string());
+        }
+        scratch.seen_dependent[definition_index] = true;
+        let (total, initial_charge) = parse_dependent_values(
+            name,
+            &value,
+            &solver.dependent_definitions[definition_index],
+        )?;
+        let mut prepared = match scratch.definition_cache[definition_index] {
+            Some(cached) if cached.key == chemistry_key => cached.prepared,
+            _ => {
+                let prepared = prepare_definition(
+                    &solver.dependent_definitions[definition_index],
+                    temp,
+                    &activity.log_gammas,
+                );
+                scratch.definition_cache[definition_index] = Some(CachedDefinition {
+                    key: chemistry_key,
+                    prepared,
+                });
+                prepared
+            }
+        };
+        prepared.total = total;
+        scratch.prepared.push(prepared);
+        starting_charge += initial_charge;
+    }
+    scratch.dependent_order.truncate(dependent_values.len());
+
+    if !independent_values.is_empty() && independent_values.names().is_none() {
+        return Err("Every entry in `ph_independent` must have a non-empty name.".to_string());
+    }
+    let mut dose_charge = 0.0;
+    for (position, (name, value)) in independent_values.iter().enumerate() {
+        if name.is_empty() {
+            return Err("Every entry in `ph_independent` must have a non-empty name.".to_string());
+        }
+        let definition_index = resolve_runtime_index(
+            name,
+            position,
+            &solver.independent_names,
+            &solver.independent_index,
+            &mut scratch.independent_order,
+        )
+        .ok_or_else(|| format!("Unknown compound in `ph_independent`: {name}."))?;
+        if scratch.seen_independent[definition_index] {
+            return Err("Names in `ph_independent` must be unique.".to_string());
+        }
+        scratch.seen_independent[definition_index] = true;
+        let dose = finite_scalar(&value)
+            .filter(|number| *number >= 0.0)
+            .ok_or_else(|| format!("`ph_independent${name}` must be one finite number >= 0."))?;
+        dose_charge += f64::from(solver.independent_definitions[definition_index].charge) * dose;
+    }
+    scratch.independent_order.truncate(independent_values.len());
+
+    Ok((
+        activity.gamma_h,
+        activity.log_gamma_h,
+        dose_charge,
+        starting_charge,
+    ))
+}
+
+/// Creates an owning pointer so catalog validation and parsing happen only once.
+///
+/// @keywords internal
+/// @usage NULL
+#[extendr]
+fn create_solver(ph_dependent: List, ph_independent_charges: List) -> ExternalPtr<SolverConfig> {
+    let result =
+        validate_catalog(&ph_dependent, &ph_independent_charges).map(|(dependent, independent)| {
+            ExternalPtr::new(SolverConfig::from_catalogs(dependent, independent))
+        });
+    match result {
+        Ok(solver) => solver,
+        Err(error) => throw_r_error(error),
     }
 }
 
-
-
-/// Solves for pH for water chemistry equilibrium.
+/// Bridges `solve.solvephrust_solver()` inputs into the validated numerical core.
 ///
-/// This function takes individual parameters and performs the pH calculation.
-/// It should be called from the R wrapper function.
-///
-/// @param temp Temperature in Celsius
-/// @param ionic_strength Ionic strength in M (optional, use NULL if not available)
-/// @param kw Water dissociation constant
-/// @param tot_po4 Total phosphate concentration
-/// @param tot_co3 Total carbonate concentration
-/// @param tot_ocl Total hypochlorite concentration (free chlorine)
-/// @param tot_nh3 Total ammonia concentration
-/// @param tot_ch3coo Total acetate concentration
-/// @param h2po4_i Initial H2PO4- concentration
-/// @param hpo4_i Initial HPO4^2- concentration
-/// @param po4_i Initial PO4^3- concentration
-/// @param ocl_i Initial OCl- concentration
-/// @param nh4_i Initial NH4+ concentration
-/// @param ch3coo_i Initial CH3COO- concentration
-/// @param carbonate_alk_eq Carbonate alkalinity in equivalents
-/// @param oh_i Initial OH- concentration
-/// @param h_i Initial H+ concentration
-/// @param so4_dose Sulfate dose
-/// @param na_dose Sodium dose
-/// @param ca_dose Calcium dose
-/// @param mg_dose Magnesium dose
-/// @param cl_dose Chloride dose
-/// @param mno4_dose Permanganate dose
-/// @param no3_dose Nitrate dose
-/// @export
+/// @keywords internal
+/// @usage NULL
 #[extendr]
-fn solve_ph(
-    temp: f64,
-    ionic_strength: Nullable<f64>,
-    kw: f64,
-    tot_po4: f64,
-    tot_co3: f64,
-    tot_ocl: f64,
-    tot_nh3: f64,
-    tot_ch3coo: f64,
-    h2po4_i: f64,
-    hpo4_i: f64,
-    po4_i: f64,
-    ocl_i: f64,
-    nh4_i: f64,
-    ch3coo_i: f64,
-    carbonate_alk_eq: f64,
-    oh_i: f64,
-    h_i: f64,
-    so4_dose: f64,
-    na_dose: f64,
-    ca_dose: f64,
-    mg_dose: f64,
-    cl_dose: f64,
-    mno4_dose: f64,
-    no3_dose: f64,
+#[allow(clippy::too_many_arguments)]
+fn solve_generic(
+    solver: ExternalPtr<SolverConfig>,
+    temp: Robj,
+    ionic_strength: Robj,
+    kw: Robj,
+    dependent_compounds: List,
+    independent_compounds: List,
+    h_i: Robj,
+    oh_i: Robj,
 ) -> f64 {
-    let water = WaterParams {
-        temp,
-        ionic_strength: ionic_strength.into(),
-        kw,
-        tot_po4,
-        tot_co3,
-        tot_ocl,
-        tot_nh3,
-        tot_ch3coo,
-        h2po4_i,
-        hpo4_i,
-        po4_i,
-        ocl_i,
-        nh4_i,
-        ch3coo_i,
-        carbonate_alk_eq,
-        oh_i,
-        h_i,
-    };
-
-    let doses = DoseParams {
-        so4_dose,
-        na_dose,
-        ca_dose,
-        mg_dose,
-        cl_dose,
-        mno4_dose,
-        no3_dose,
-    };
-
-    match solve_ph_internal(&water, &doses) {
-        Ok(ph) => ph,
-        Err(msg) => {
-            rprintln!("Error in solve_ph: {}", msg);
-            f64::NAN
+    let result = (|| {
+        let temp = scalar_number(&temp, "temp")?;
+        if temp <= -273.15 {
+            return Err("`temp` must be one finite number > -273.15.".to_string());
         }
+        let ionic_strength = optional_nonnegative_number(&ionic_strength, "ionic_strength")?;
+        let kw = positive_number(&kw, "kw")?;
+        let h_i = nonnegative_number(&h_i, "h_i")?;
+        let oh_i = nonnegative_number(&oh_i, "oh_i")?;
+        let mut scratch = solver.scratch.try_borrow_mut().map_err(|_| {
+            "A solvephrust solver cannot be used reentrantly from the same R call.".to_string()
+        })?;
+        let (gamma_h, log_gamma_h, dose_charge, starting_charge) = prepare_runtime_inputs(
+            &solver,
+            &mut scratch,
+            temp,
+            ionic_strength,
+            &dependent_compounds,
+            &independent_compounds,
+            h_i,
+            oh_i,
+        )?;
+        solve_prepared(
+            kw,
+            &scratch.prepared,
+            gamma_h,
+            log_gamma_h,
+            dose_charge,
+            starting_charge,
+        )
+    })();
+    match result {
+        Ok(value) => value,
+        Err(error) => throw_r_error(error),
     }
 }
 
 extendr_module! {
-    mod sovlephrust;
-    fn solve_ph;
+    mod solvephrust;
+    fn create_solver;
+    fn solve_generic;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keeps the small set of reference species fractions on the stack.
+    #[derive(Debug, Clone, Copy)]
+    struct AlphaFractions {
+        values: [f64; MAX_SPECIES],
+        len: usize,
+    }
+
+    impl AlphaFractions {
+        /// Exposes only entries populated for the compound's actual valence.
+        fn as_slice(&self) -> &[f64] {
+            &self.values[..self.len]
+        }
+    }
+
+    /// Calculates stable reference alphas indexed by distance from neutral.
+    fn calculate_alphas(h: f64, ks: &[f64], direction: ChargeDirection) -> AlphaFractions {
+        let len = ks.len() + 1;
+        debug_assert!(len <= MAX_SPECIES);
+        let log_h = h.ln();
+        let mut cumulative_log_weight = 0.0;
+        let mut weights = [0.0; MAX_SPECIES];
+        for (index, k) in ks.iter().enumerate() {
+            cumulative_log_weight += match direction {
+                ChargeDirection::Negative => k.ln() - log_h,
+                ChargeDirection::Positive => log_h - k.ln(),
+            };
+            weights[index + 1] = cumulative_log_weight;
+        }
+        let maximum = weights[..len]
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut total_weight = 0.0;
+        for weight in &mut weights[..len] {
+            *weight = (*weight - maximum).exp();
+            total_weight += *weight;
+        }
+        for weight in &mut weights[..len] {
+            *weight /= total_weight;
+        }
+        AlphaFractions {
+            values: weights,
+            len,
+        }
+    }
+
+    /// States the equivalent direct alpha equations for readability checks.
+    fn calculate_alphas_without_logs(
+        h: f64,
+        ks: &[f64],
+        direction: ChargeDirection,
+    ) -> AlphaFractions {
+        let len = ks.len() + 1;
+        debug_assert!(len <= MAX_SPECIES);
+        let mut cumulative_weight = 1.0;
+        let mut weights = [0.0; MAX_SPECIES];
+        weights[0] = cumulative_weight;
+        for (index, k) in ks.iter().enumerate() {
+            cumulative_weight *= match direction {
+                ChargeDirection::Negative => k / h,
+                ChargeDirection::Positive => h / k,
+            };
+            weights[index + 1] = cumulative_weight;
+        }
+        let total_weight: f64 = weights[..len].iter().sum();
+        for weight in &mut weights[..len] {
+            *weight /= total_weight;
+        }
+        AlphaFractions {
+            values: weights,
+            len,
+        }
+    }
+
+    /// Supplies reproducible pseudo-random values without adding a dependency.
+    struct TestRng(u64);
+
+    impl TestRng {
+        /// Advances the generator and returns a value in [0, 1).
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1_u64 << 53) as f64
+        }
+    }
+
+    /// Returns a nearest-rank percentile from a non-empty sample.
+    fn percentile(values: &mut [usize], probability: f64) -> usize {
+        values.sort_unstable();
+        let index = ((probability * values.len() as f64).ceil() as usize)
+            .saturating_sub(1)
+            .min(values.len() - 1);
+        values[index]
+    }
+
+    #[test]
+    fn alpha_fractions_sum_to_one_for_every_supported_state_count() {
+        for ks in [vec![1e-7], vec![1e-6, 1e-10], vec![1e-2, 1e-7, 1e-12]] {
+            for direction in [ChargeDirection::Negative, ChargeDirection::Positive] {
+                let alphas = calculate_alphas(1e-8, &ks, direction);
+                assert!((alphas.as_slice().iter().sum::<f64>() - 1.0).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn alphas_follow_distance_from_neutral_k_ordering() {
+        let ks = [2.0, 2.0, 2.0];
+        let negative = calculate_alphas(4.0, &ks, ChargeDirection::Negative);
+        let positive = calculate_alphas(4.0, &ks, ChargeDirection::Positive);
+        let negative_weights = [1.0, 0.5, 0.25, 0.125];
+        let positive_weights = [1.0, 2.0, 4.0, 8.0];
+        let negative_total: f64 = negative_weights.iter().sum();
+        let positive_total: f64 = positive_weights.iter().sum();
+        for index in 0..4 {
+            assert!(
+                (negative.as_slice()[index] - negative_weights[index] / negative_total).abs()
+                    < 1e-14
+            );
+            assert!(
+                (positive.as_slice()[index] - positive_weights[index] / positive_total).abs()
+                    < 1e-14
+            );
+        }
+    }
+
+    #[test]
+    fn log_and_direct_alpha_calculations_are_equivalent() {
+        let cases = [
+            (1e-8, vec![1e-7]),
+            (1e-8, vec![1e-6, 1e-10]),
+            (1e-8, vec![1e-2, 1e-7, 1e-12]),
+        ];
+        for (h, ks) in cases {
+            for direction in [ChargeDirection::Negative, ChargeDirection::Positive] {
+                let log_alphas = calculate_alphas(h, &ks, direction);
+                let direct_alphas = calculate_alphas_without_logs(h, &ks, direction);
+                for (log_alpha, direct_alpha) in
+                    log_alphas.as_slice().iter().zip(direct_alphas.as_slice())
+                {
+                    assert!((log_alpha - direct_alpha).abs() < 1e-14);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn positive_k_charge_transitions_start_next_to_neutral() {
+        assert_eq!(ion_charges(ChargeDirection::Positive, 0), (1, 0));
+        assert_eq!(ion_charges(ChargeDirection::Positive, 1), (2, 1));
+        assert_eq!(ion_charges(ChargeDirection::Positive, 2), (3, 2));
+    }
+
+    #[test]
+    fn charge_direction_selects_opposite_limiting_states() {
+        let negative = PreparedCompound {
+            cumulative_log_k: [0.0, 1e-7_f64.ln(), 0.0, 0.0],
+            len: 2,
+            charge_direction: ChargeDirection::Negative,
+            total: 1.0,
+        };
+        let positive = PreparedCompound {
+            charge_direction: ChargeDirection::Positive,
+            ..negative
+        };
+        assert!(charge_moments(&negative, 0.0).charge.abs() < 1e-6);
+        assert!((charge_moments(&negative, 1e-14_f64.ln()).charge + 1.0).abs() < 1e-6);
+        assert!((charge_moments(&positive, 0.0).charge - 1.0).abs() < 1e-6);
+        assert!(charge_moments(&positive, 1e-14_f64.ln()).charge.abs() < 1e-6);
+    }
+
+    #[test]
+    fn activity_correction_uses_transition_charge_states() {
+        let negative = DependentDefinition {
+            ions: vec![Ion::new(1e-7, 0.0)],
+            charge_direction: ChargeDirection::Negative,
+        };
+        let positive = DependentDefinition {
+            ions: vec![Ion::new(1e-7, 0.0)],
+            charge_direction: ChargeDirection::Positive,
+        };
+        let ionic_strength = Some(0.1);
+        let gamma_one = calculate_activity(1, ionic_strength, 25.0);
+        let coefficients = activity_coefficients(ionic_strength, 25.0);
+        let log_gamma_one = gamma_one.ln();
+        let log_gammas = [0.0, log_gamma_one, 4.0 * log_gamma_one, 9.0 * log_gamma_one];
+        assert!((coefficients[2] - calculate_activity(2, ionic_strength, 25.0)).abs() < 1e-15);
+        assert!((coefficients[3] - calculate_activity(3, ionic_strength, 25.0)).abs() < 1e-15);
+        let negative_prepared = prepare_definition(&negative, 25.0, &log_gammas);
+        let positive_prepared = prepare_definition(&positive, 25.0, &log_gammas);
+        let negative_k = negative_prepared.cumulative_log_k[1].exp();
+        let positive_k = positive_prepared.cumulative_log_k[1].exp();
+        assert!((negative_k - 1e-7 / gamma_one.powi(2)).abs() < 1e-20);
+        assert!((positive_k - 1e-7).abs() < 1e-20);
+
+        let dipositive = DependentDefinition {
+            ions: vec![Ion::new(1e-7, 0.0), Ion::new(1e-9, 0.0)],
+            charge_direction: ChargeDirection::Positive,
+        };
+        let corrected = prepare_definition(&dipositive, 25.0, &log_gammas);
+        let corrected_k1 = corrected.cumulative_log_k[1].exp();
+        let corrected_k2 = (corrected.cumulative_log_k[2] - corrected.cumulative_log_k[1]).exp();
+        let gamma_two = calculate_activity(2, ionic_strength, 25.0);
+        assert!((corrected_k1 - 1e-7).abs() < 1e-20);
+        assert!((corrected_k2 - 1e-9 * gamma_two / gamma_one.powi(2)).abs() < 1e-20);
+    }
+
+    #[test]
+    fn charge_moment_derivative_matches_finite_differences() {
+        let constant_sets: [Vec<f64>; 3] = [vec![1e-6], vec![1e-4, 1e-9], vec![1e-3, 1e-7, 1e-12]];
+        for ks in constant_sets {
+            for direction in [ChargeDirection::Negative, ChargeDirection::Positive] {
+                let mut cumulative_log_k = [0.0; MAX_SPECIES];
+                for (index, k) in ks.iter().enumerate() {
+                    cumulative_log_k[index + 1] = cumulative_log_k[index] + k.ln();
+                }
+                let compound = PreparedCompound {
+                    cumulative_log_k,
+                    len: ks.len() + 1,
+                    charge_direction: direction,
+                    total: 0.013,
+                };
+                let compounds = [compound];
+                let balance = ChargeBalance {
+                    compounds: &compounds,
+                    kw: 1e-14,
+                    gamma_h: 0.81,
+                    dose_charge: 0.002,
+                    starting_charge: -0.003,
+                };
+                for ph in [1.0, 5.5, 9.5, 13.0] {
+                    let log_h = -ph * std::f64::consts::LN_10;
+                    let epsilon = 1e-6;
+                    let point = balance.evaluate(log_h);
+                    let numerical = (balance.evaluate(log_h + epsilon).balance
+                        - balance.evaluate(log_h - epsilon).balance)
+                        / (2.0 * epsilon);
+                    let scale = point.derivative.abs().max(1e-12);
+                    assert!(
+                        (point.derivative - numerical).abs() / scale < 1e-6,
+                        "direction={direction:?} ks={ks:?} ph={ph} analytic={} numerical={numerical}",
+                        point.derivative
+                    );
+                    assert!(point.derivative > 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn safeguarded_solver_handles_domain_boundaries_and_no_bracket() {
+        let lower_h = 1e-14;
+        let lower_oh = 1e-14 / lower_h;
+        let lower = solve_prepared(1e-14, &[], 1.0, 0.0, 0.0, lower_h - lower_oh).unwrap();
+        assert!((lower - 14.0).abs() < 1e-11);
+
+        let upper_h = 1.0;
+        let upper_oh = 1e-14 / upper_h;
+        let upper = solve_prepared(1e-14, &[], 1.0, 0.0, 0.0, upper_h - upper_oh).unwrap();
+        assert!(upper.abs() < 1e-11);
+        assert!(solve_prepared(1e-14, &[], 1.0, 0.0, 0.0, 2.0).is_err());
+    }
+
+    #[test]
+    fn newton_solves_deterministic_random_chemistry() {
+        let mut rng = TestRng(0x5eed_fade_cafe_beef);
+        let mut newton_evaluations = Vec::new();
+
+        for case_index in 0..2_000 {
+            let valence = case_index % (MAX_SPECIES - 1) + 1;
+            let direction = if case_index % 2 == 0 {
+                ChargeDirection::Negative
+            } else {
+                ChargeDirection::Positive
+            };
+            let ions: Vec<Ion> = (0..valence)
+                .map(|_| {
+                    Ion::new(
+                        10_f64.powf(-14.0 + 13.0 * rng.next()),
+                        -50_000.0 + 100_000.0 * rng.next(),
+                    )
+                })
+                .collect();
+            let temp = -10.0 + 90.0 * rng.next();
+            let ionic_strength = if case_index % 4 == 0 {
+                None
+            } else {
+                Some(0.3 * rng.next())
+            };
+            let total = 10_f64.powf(-8.0 + 7.0 * rng.next());
+            let target_log_h = -(0.05 + 13.9 * rng.next()) * std::f64::consts::LN_10;
+            let target_h = target_log_h.exp();
+            let gammas = activity_coefficients(ionic_strength, temp);
+            let log_gamma_h = gammas[1].ln();
+            let log_gammas = [0.0, log_gamma_h, 4.0 * log_gamma_h, 9.0 * log_gamma_h];
+            let definition = DependentDefinition {
+                ions,
+                charge_direction: direction,
+            };
+            let mut prepared = prepare_definition(&definition, temp, &log_gammas);
+            prepared.total = total;
+            let corrected: Vec<f64> = (0..valence)
+                .map(|index| {
+                    (prepared.cumulative_log_k[index + 1] - prepared.cumulative_log_k[index]).exp()
+                })
+                .collect();
+            let alphas = calculate_alphas(target_h, &corrected, direction);
+            let initial_dependent_charge: f64 = alphas.as_slice()[1..]
+                .iter()
+                .enumerate()
+                .map(|(index, alpha)| {
+                    total * alpha * f64::from(direction.sign()) * (index + 1) as f64
+                })
+                .sum();
+            let target_oh = 1e-14 / (target_h * gammas[1] * gammas[1]);
+
+            let expected = -(target_log_h + log_gamma_h) / std::f64::consts::LN_10;
+            let compounds = [prepared];
+            let balance = ChargeBalance {
+                compounds: &compounds,
+                kw: 1e-14,
+                gamma_h: gammas[1],
+                dose_charge: 0.0,
+                starting_charge: target_h - target_oh + initial_dependent_charge,
+            };
+            let newton = find_root_safeguarded(&balance).unwrap();
+            let newton_ph = -(newton.log_h + log_gamma_h) / std::f64::consts::LN_10;
+            assert!(
+                (newton_ph - expected).abs() <= 1e-10,
+                "case={case_index} newton={newton_ph:.16} expected={expected:.16} difference={:.3e}",
+                (newton_ph - expected).abs()
+            );
+            newton_evaluations.push(newton.evaluations);
+        }
+
+        let newton_median = percentile(&mut newton_evaluations, 0.5);
+        let newton_p95 = percentile(&mut newton_evaluations, 0.95);
+        let newton_max = *newton_evaluations.iter().max().unwrap();
+        eprintln!("evaluations: newton median={newton_median} p95={newton_p95} max={newton_max}");
+        assert!(newton_p95 <= 20);
+        assert!(newton_max <= MAX_ROOT_ITERATIONS);
+    }
 }

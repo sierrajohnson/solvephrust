@@ -2,45 +2,21 @@
 
 # nolint start
 
-#
-# This file was created with the following call:
-#   .Call("wrap__make_sovlephrust_wrappers", use_symbols = TRUE, package_name = "sovlephrust")
-
 #' @usage NULL
-#' @useDynLib sovlephrust, .registration = TRUE
+#' @useDynLib solvephrust, .registration = TRUE
 NULL
 
-#' Solves for pH for water chemistry equilibrium.
+#' Create an owning pointer to a parsed Rust solver catalog
 #'
-#' This function takes individual parameters and performs the pH calculation.
-#' It should be called from the R wrapper function.
+#' @keywords internal
+#' @usage NULL
+create_solver <- function(ph_dependent, ph_independent_charges) .Call(wrap__create_solver, ph_dependent, ph_independent_charges)
+
+#' Rust backend for the generic pH solver
 #'
-#' @param temp Temperature in Celsius
-#' @param ionic_strength Ionic strength in M (optional, use NULL if not available)
-#' @param kw Water dissociation constant
-#' @param tot_po4 Total phosphate concentration
-#' @param tot_co3 Total carbonate concentration
-#' @param tot_ocl Total hypochlorite concentration (free chlorine)
-#' @param tot_nh3 Total ammonia concentration
-#' @param tot_ch3coo Total acetate concentration
-#' @param h2po4_i Initial H2PO4- concentration
-#' @param hpo4_i Initial HPO4^2- concentration
-#' @param po4_i Initial PO4^3- concentration
-#' @param ocl_i Initial OCl- concentration
-#' @param nh4_i Initial NH4+ concentration
-#' @param ch3coo_i Initial CH3COO- concentration
-#' @param carbonate_alk_eq Carbonate alkalinity in equivalents
-#' @param oh_i Initial OH- concentration
-#' @param h_i Initial H+ concentration
-#' @param so4_dose Sulfate dose
-#' @param na_dose Sodium dose
-#' @param ca_dose Calcium dose
-#' @param mg_dose Magnesium dose
-#' @param cl_dose Chloride dose
-#' @param mno4_dose Permanganate dose
-#' @param no3_dose Nitrate dose
-#' @export
-solve_ph <- function(temp, ionic_strength, kw, tot_po4, tot_co3, tot_ocl, tot_nh3, tot_ch3coo, h2po4_i, hpo4_i, po4_i, ocl_i, nh4_i, ch3coo_i, carbonate_alk_eq, oh_i, h_i, so4_dose, na_dose, ca_dose, mg_dose, cl_dose, mno4_dose, no3_dose) .Call(wrap__solve_ph, temp, ionic_strength, kw, tot_po4, tot_co3, tot_ocl, tot_nh3, tot_ch3coo, h2po4_i, hpo4_i, po4_i, ocl_i, nh4_i, ch3coo_i, carbonate_alk_eq, oh_i, h_i, so4_dose, na_dose, ca_dose, mg_dose, cl_dose, mno4_dose, no3_dose)
+#' @keywords internal
+#' @usage NULL
+solve_generic <- function(solver, temp, ionic_strength, kw, dependent_compounds, independent_compounds, h_i, oh_i) .Call(wrap__solve_generic, solver, temp, ionic_strength, kw, dependent_compounds, independent_compounds, h_i, oh_i)
 
 
 # nolint end
