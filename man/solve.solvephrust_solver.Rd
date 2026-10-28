@@ -49,3 +49,31 @@ The equilibrium pH as a full-precision numeric scalar.
 this is a method for base R's \code{\link[=solve]{solve()}} generic; positional or unused values
 supplied through them are rejected.
 }
+\examples{
+solver <- new_default_solver()
+
+# Carbonate and phosphate buffered water dosed with sodium and chloride
+solve(
+  solver,
+  temp = 20,
+  kw = 1e-14,
+  ionic_strength = 0.005,
+  ph_dependent = list(
+    co3 = list(total = 2e-3, initial = list(1.9e-3, 0)),
+    po4 = list(total = 1e-4, initial = list(5e-5, 5e-5, 0))
+  ),
+  ph_independent = list(na = 1e-3, cl = 1e-3),
+  h_i = 1e-7,
+  oh_i = 1e-7
+)
+
+# A solver can be reused across many solves without reparsing its catalog
+vapply(c(5, 15, 25), function(temp) {
+  solve(
+    solver,
+    temp = temp,
+    kw = 1e-14,
+    ph_dependent = list(co3 = list(total = 2e-3, initial = list(1.9e-3, 0)))
+  )
+}, numeric(1))
+}

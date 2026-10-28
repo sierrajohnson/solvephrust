@@ -1,0 +1,51 @@
+The solvephrust package includes the following vendored 'Rust' crates
+(src/rust/vendor.tar.xz). Copyright for each crate is held by its authors,
+listed below with the crate's license.
+
+Name: extendr-api
+Version: 0.8.1
+License: MIT
+Authors: andy-thomason, Thomas Down, Mossa Merhi Reimert, Josiah Parry,
+  Claus O. Wilke, Hiroaki Yutani, Ilia A. Kosenkov, Michael Milton
+
+Name: extendr-ffi
+Version: 0.8.1
+License: MIT
+Authors: andy-thomason, Thomas Down, Mossa Merhi Reimert, Josiah Parry,
+  Claus O. Wilke, Hiroaki Yutani, Ilia A. Kosenkov, Michael Milton
+
+Name: extendr-macros
+Version: 0.8.1
+License: MIT
+Authors: andy-thomason, Thomas Down, Mossa Merhi Reimert, Josiah Parry,
+  Claus O. Wilke, Hiroaki Yutani, Ilia A. Kosenkov, Michael Milton
+
+Name: once_cell
+Version: 1.21.3
+License: MIT OR Apache-2.0
+Authors: Aleksey Kladov
+
+Name: paste
+Version: 1.0.15
+License: MIT OR Apache-2.0
+Authors: David Tolnay
+
+Name: proc-macro2
+Version: 1.0.101
+License: MIT OR Apache-2.0
+Authors: David Tolnay, Alex Crichton
+
+Name: quote
+Version: 1.0.40
+License: MIT OR Apache-2.0
+Authors: David Tolnay
+
+Name: syn
+Version: 2.0.106
+License: MIT OR Apache-2.0
+Authors: David Tolnay
+
+Name: unicode-ident
+Version: 1.0.19
+License: (MIT OR Apache-2.0) AND Unicode-3.0
+Authors: David Tolnay

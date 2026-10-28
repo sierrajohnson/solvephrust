@@ -24,3 +24,25 @@ serializable across R sessions.
 \description{
 Create a configurable pH solver
 }
+\examples{
+# A monoprotic weak acid (pKa 7) balanced by a fixed-charge cation
+solver <- new_solver(
+  ph_dependent = list(
+    weak_acid = list(
+      constants = list(list(k = 1e-7, delta_h = 0)),
+      charge = -1
+    )
+  ),
+  ph_independent_charges = list(cation = 1)
+)
+
+solve(
+  solver,
+  temp = 25,
+  kw = 1e-14,
+  ph_dependent = list(weak_acid = list(total = 1e-3, initial = list(5e-4))),
+  ph_independent = list(cation = 5e-4),
+  h_i = 1e-7,
+  oh_i = 1e-7
+)
+}
