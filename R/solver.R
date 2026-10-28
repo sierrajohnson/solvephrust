@@ -10,6 +10,27 @@
 #' @return A `solvephrust_solver` external pointer for use with [solve()]. The
 #'   object owns its parsed Rust configuration and is intentionally not
 #'   serializable across R sessions.
+#' @examples
+#' # A monoprotic weak acid (pKa 7) balanced by a fixed-charge cation
+#' solver <- new_solver(
+#'   ph_dependent = list(
+#'     weak_acid = list(
+#'       constants = list(list(k = 1e-7, delta_h = 0)),
+#'       charge = -1
+#'     )
+#'   ),
+#'   ph_independent_charges = list(cation = 1)
+#' )
+#'
+#' solve(
+#'   solver,
+#'   temp = 25,
+#'   kw = 1e-14,
+#'   ph_dependent = list(weak_acid = list(total = 1e-3, initial = list(5e-4))),
+#'   ph_independent = list(cation = 5e-4),
+#'   h_i = 1e-7,
+#'   oh_i = 1e-7
+#' )
 #' @export
 new_solver <- function(ph_dependent = list(), ph_independent_charges = list()) {
   pointer <- create_solver(ph_dependent, ph_independent_charges)
@@ -23,6 +44,19 @@ new_solver <- function(ph_dependent = list(), ph_independent_charges = list()) {
 #' `sio4`, and the fixed-charge compounds `so4`, `na`, `ca`, `mg`, `cl`, `mno4`,
 #' and `no3`.
 #' @return A new `solvephrust_solver` external pointer.
+#' @examples
+#' solver <- new_default_solver()
+#'
+#' # Water with 2.5 mM total carbonate, nearly all as bicarbonate
+#' solve(
+#'   solver,
+#'   temp = 25,
+#'   kw = 1e-14,
+#'   ionic_strength = 0.01,
+#'   ph_dependent = list(
+#'     co3 = list(total = 0.0025, initial = list(0.0024, 0))
+#'   )
+#' )
 #' @export
 new_default_solver <- function() {
   new_solver(
@@ -51,6 +85,33 @@ new_default_solver <- function() {
 #' @param h_i Initial hydrogen-ion concentration.
 #' @param oh_i Initial hydroxide-ion concentration.
 #' @return The equilibrium pH as a full-precision numeric scalar.
+#' @examples
+#' solver <- new_default_solver()
+#'
+#' # Carbonate and phosphate buffered water dosed with sodium and chloride
+#' solve(
+#'   solver,
+#'   temp = 20,
+#'   kw = 1e-14,
+#'   ionic_strength = 0.005,
+#'   ph_dependent = list(
+#'     co3 = list(total = 2e-3, initial = list(1.9e-3, 0)),
+#'     po4 = list(total = 1e-4, initial = list(5e-5, 5e-5, 0))
+#'   ),
+#'   ph_independent = list(na = 1e-3, cl = 1e-3),
+#'   h_i = 1e-7,
+#'   oh_i = 1e-7
+#' )
+#'
+#' # A solver can be reused across many solves without reparsing its catalog
+#' vapply(c(5, 15, 25), function(temp) {
+#'   solve(
+#'     solver,
+#'     temp = temp,
+#'     kw = 1e-14,
+#'     ph_dependent = list(co3 = list(total = 2e-3, initial = list(1.9e-3, 0)))
+#'   )
+#' }, numeric(1))
 #' @export
 solve.solvephrust_solver <- function(a, b, ..., temp, kw,
                                      ionic_strength = NULL,

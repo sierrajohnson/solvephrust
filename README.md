@@ -6,7 +6,7 @@
 
 This repository implements a configurable solver for water pH equilibrium.
 
-The actual solver is implemented in Rust as is ~50x faster than the equivalent R implementation using uniroot.
+The actual solver is implemented in Rust and is ~50x faster than the equivalent R implementation using uniroot.
 
 This package is designed to work with [tidywater](https://github.com/BrownAndCaldwell-Public/tidywater), but can be used independently.
 

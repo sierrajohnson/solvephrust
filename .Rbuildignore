@@ -6,3 +6,9 @@
 ^src/Makevars\.win$
 ^\.github$
 ^LICENSE\.md$
+^data-raw$
+^\.posit$
+^tools/benchmark\.R$
+^cran-comments\.md$
+^CRAN-SUBMISSION$
+^CRAN-checklist\.md$
