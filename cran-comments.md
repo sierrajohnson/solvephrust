@@ -3,6 +3,9 @@
 0 errors | 0 warnings | 1 note
 
 * This is a new release.
+* "enthalpies" in DESCRIPTION is flagged as possibly misspelled; it is the
+  correct plural of "enthalpy" (reaction enthalpies used for temperature
+  correction of equilibrium constants).
 
 ## Rust
 
@@ -15,8 +18,8 @@
 
 ## Test environments
 
-<!-- TODO: fill in after running the checks in CRAN-checklist.md -->
-* local Windows 11, R 4.6.2
-* win-builder (devel)
-* macOS builder (release)
-* R-hub (linux)
+* local Windows 11 x64, R 4.6.2: 0 errors | 0 warnings | 0 notes
+* win-builder, Windows Server 2022 x64, R-devel (2026-11-12 r90881 ucrt):
+  0 errors | 0 warnings | 1 note (new submission; "enthalpies" spelling)
+* macOS builder, macOS 26.6 arm64 (Apple M1), R 4.6.1: 0 errors | 0 warnings |
+  0 notes
