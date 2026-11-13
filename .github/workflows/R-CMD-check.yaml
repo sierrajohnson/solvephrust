@@ -19,9 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          # Slightly minimizing our test surface
-          # - {os: macos-latest,   r: 'release'}
-          # - {os: windows-latest, r: 'release'}
+          - {os: macos-latest,   r: 'release'}
+          - {os: windows-latest, r: 'release'}
           # - {os: ubuntu-latest,   r: 'devel', http-user-agent: 'release'}
           - {os: ubuntu-latest,   r: 'release'}
           - {os: ubuntu-latest,   r: 'oldrel-1'}
@@ -32,6 +31,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Makevars.win builds for the GNU target; runners default to MSVC
+      - name: Add Rust GNU target (Windows)
+        if: runner.os == 'Windows'
+        run: rustup target add x86_64-pc-windows-gnu
 
       - uses: r-lib/actions/setup-pandoc@v2
 

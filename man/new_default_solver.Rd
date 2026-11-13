@@ -15,3 +15,17 @@ pH-dependent compounds \code{co3}, \code{po4}, \code{ocl}, \code{nh3}, \code{ch3
 \code{sio4}, and the fixed-charge compounds \code{so4}, \code{na}, \code{ca}, \code{mg}, \code{cl}, \code{mno4},
 and \code{no3}.
 }
+\examples{
+solver <- new_default_solver()
+
+# Water with 2.5 mM total carbonate, nearly all as bicarbonate
+solve(
+  solver,
+  temp = 25,
+  kw = 1e-14,
+  ionic_strength = 0.01,
+  ph_dependent = list(
+    co3 = list(total = 0.0025, initial = list(0.0024, 0))
+  )
+)
+}
