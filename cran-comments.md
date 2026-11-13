@@ -23,3 +23,5 @@
   0 errors | 0 warnings | 1 note (new submission; "enthalpies" spelling)
 * macOS builder, macOS 26.6 arm64 (Apple M1), R 4.6.1: 0 errors | 0 warnings |
   0 notes
+* GitHub Actions, Ubuntu 26.04 LTS, R 4.6.2 (release) and R 4.5.3 (oldrel-1):
+  0 errors | 0 warnings | 0 notes
