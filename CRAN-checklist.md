@@ -20,22 +20,20 @@ policy. This file is excluded from the package build.
 
 ## To confirm
 
-- [ ] Carter's family name (and optionally email/ORCID) in `Authors@R`;
-      currently `person("Carter", role = "ctb")`
-- [ ] Maintainer email: CRAN emails it for the life of the package, so it must
-      be an address you will keep monitoring
-- [ ] ISBN for Benjamin (2015) in `Description` (`9781478623083`, *Water
+- [x] Carter's family name in `Authors@R` (`person("Carter", "Schultz", role = "ctb")`)
+- [x] Maintainer email: `sierra.johnson.1484@gmail.com`
+- [x] ISBN for Benjamin (2015) in `Description` (`9781478623083`, *Water
       Chemistry*, 2nd ed.)
 - [ ] `LICENSE` year and copyright holder (`2025`, `solvephrust authors`)
 
 ## Local checks
 
-- [ ] Install LaTeX so the PDF manual check runs, e.g. `tinytex::install_tinytex()`
-- [ ] Install pandoc (or run from RStudio/Positron) so `README.md` and
+- [x] Install LaTeX so the PDF manual check runs, e.g. `tinytex::install_tinytex()`
+- [x] Install pandoc (or run from RStudio/Positron) so `README.md` and
       `NEWS.md` are checked
 - [ ] `devtools::check(remote = TRUE, manual = TRUE)` with 0 errors, 0 warnings,
       and only the "New submission" note
-- [ ] `urlchecker::url_check()`
+- [x] `urlchecker::url_check()`
 - [ ] `spelling::spell_check_package()` (install `spelling` first); add a
       `inst/WORDLIST` for chemistry terms
 - [ ] Build from a clean checkout so stale `src/*.o` and `src/*.dll` files are

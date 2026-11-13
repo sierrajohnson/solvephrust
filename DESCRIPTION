@@ -2,8 +2,8 @@ Package: solvephrust
 Title: Fast Generic Water Chemistry pH Solver
 Version: 0.1.0
 Authors@R: c(
-    person("Sierra", "Johnson", , "sjohnson2@brwncald.com", role = c("aut", "cre")),
-    person("Carter", role = "ctb"),
+    person("Sierra", "Johnson", , "sierra.johnson.1484@gmail.com", role = c("aut", "cre")),
+    person("Carter", "Schultz", role = "ctb"),
     person("Authors of the dependency Rust crates", role = "cph",
            comment = "see inst/AUTHORS file")
   )

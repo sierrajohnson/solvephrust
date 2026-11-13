@@ -16,7 +16,7 @@
 ## Test environments
 
 <!-- TODO: fill in after running the checks in CRAN-checklist.md -->
-* local Windows 11, R 4.6.1
+* local Windows 11, R 4.6.2
 * win-builder (devel)
 * macOS builder (release)
 * R-hub (linux)
